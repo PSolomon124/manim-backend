@@ -33,3 +33,6 @@ async def generate_video(req: MathRequest):
         "video_url": real_video_url,
         "latex_steps": ["Step 1: Parse equation", "Step 2: Plot parabola"]
     }
+@app.get("/")
+def home():
+    return {"status": "Manim API is up and running!"}
