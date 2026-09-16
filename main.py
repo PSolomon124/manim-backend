@@ -8,14 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Provider SDKs
+# AI Provider SDKs (Only used as emergency fallbacks)
 from google import genai
 from groq import Groq
 from openai import OpenAI
 
-app = FastAPI(title="Tezla Animator - Math Animation Engine")
+app = FastAPI(title="Tezla Animator - Direct & AI Engine")
 
-# Enable CORS for frontend clients like Lovable
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,20 +23,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static video storage directory setup
 OS_OUTPUT_DIR = "rendered_videos"
 os.makedirs(OS_OUTPUT_DIR, exist_ok=True)
 app.mount("/videos", StaticFiles(directory=OS_OUTPUT_DIR), name="videos")
 
-# Pydantic Schemas for solution steps
 class SolutionStep(BaseModel):
     step_number: int
-    math_latex: str        # e.g., "2x + 5 = 13"
-    explanation: str       # e.g., "Subtract 5 from both sides"
+    math_latex: str
+    explanation: str
 
 class RenderRequest(BaseModel):
     prompt: str
-    solution_steps: Optional[List[SolutionStep]] = None  # Optional pre-solved steps
+    solution_steps: Optional[List[SolutionStep]] = None
 
 SYSTEM_PROMPT = """
 You are a Manim Python script generator for educational videos.
@@ -58,125 +55,133 @@ Rules:
          self.play(Write(eq), run_time=tracker.duration)
 
 4. Use raw strings `r"..."` for all MathTex expressions to prevent unescaped backslash crashes.
-5. If explicit step-by-step resolution data is provided, follow its order EXACTLY.
 """
 
 def clean_code_block(code_text: str) -> str:
-    """Strips markdown python block wrappers if returned by AI models."""
     cleaned = re.sub(r"^```(?:python)?", "", code_text.strip(), flags=re.MULTILINE)
     cleaned = re.sub(r"```$", "", cleaned.strip(), flags=re.MULTILINE)
     return cleaned.strip()
 
-def generate_code_with_fallback(req: RenderRequest) -> tuple[str, str]:
-    """Generates code via fallback chain: Gemini -> Groq -> OpenRouter Free Models"""
+def build_direct_manim_script(prompt: str, steps: List[SolutionStep]) -> str:
+    """Generates pure Python Manim code directly from steps without calling any AI model."""
     
-    # Format explicit solution steps into prompt if present
-    formatted_solution = ""
-    if req.solution_steps and len(req.solution_steps) > 0:
-        formatted_solution = "\nEXACT STEP-BY-STEP SOLUTION TO ANIMATE:\n"
-        for step in req.solution_steps:
-            formatted_solution += f"Step {step.step_number}: {step.explanation} | LaTeX: {step.math_latex}\n"
+    # Header & Imports
+    script = """from manim import *
+from manim_voiceover import VoiceoverScene
+from manim_voiceover.services.edge import EdgeService
 
-    full_prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"Topic / Prompt: {req.prompt}\n"
-        f"{formatted_solution}\n"
-        f"INSTRUCTION: Create a Manim VoiceoverScene animating the mathematical steps provided above."
-    )
+class GeneratedScene(VoiceoverScene):
+    def construct(self):
+        self.set_speech_service(EdgeService(voice="en-NG-EzinneNeural"))
+        
+        # Display Title / Problem Prompt
+        title = Text(""" + repr(prompt[:40]) + """, font_size=36).to_edge(UP)
+        self.play(Write(title))
+        self.wait(0.5)
+        
+        current_mobject = None
+"""
 
-    # --- TIER 1: GEMINI FREE TIER ---
+    # Build sequence for each step
+    for step in steps:
+        clean_explanation = repr(step.explanation)
+        # Escape single backslashes safely for raw LaTeX strings in python script output
+        raw_latex = f'r"{step.math_latex}"'
+        
+        script += f"""
+        # Step {step.step_number}
+        next_mobject = MathTex({raw_latex}, font_size=44)
+        
+        with self.voiceover(text={clean_explanation}) as tracker:
+            if current_mobject is None:
+                self.play(Write(next_mobject), run_time=max(1.5, tracker.duration))
+            else:
+                self.play(Transform(current_mobject, next_mobject), run_time=max(1.5, tracker.duration))
+        
+        if current_mobject is None:
+            current_mobject = next_mobject
+            
+        self.wait(0.5)
+"""
+
+    script += """
+        self.wait(1)
+"""
+    return script
+
+def solve_with_ai_fallback(prompt: str) -> str:
+    """Fallback generator ONLY used if solution_steps was empty."""
+    full_prompt = f"{SYSTEM_PROMPT}\n\nGenerate a narrated Manim scene for: {prompt}"
+
+    # Tier 1: Gemini
     gemini_key = os.getenv("GEMINI_API_KEY")
     if gemini_key:
         try:
             client = genai.Client(api_key=gemini_key)
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=full_prompt
-            )
+            response = client.models.generate_content(model="gemini-2.5-flash", contents=full_prompt)
             if response.text:
-                print("Generated code via Gemini Free Tier")
-                return clean_code_block(response.text), "Gemini"
+                return clean_code_block(response.text)
         except Exception as e:
-            print(f"Gemini Free Tier failed/exhausted ({str(e)}). Switching to Groq...")
+            print(f"Gemini fallback failed: {str(e)}")
 
-    # --- TIER 2: GROQ FREE TIER ---
+    # Tier 2: Groq
     groq_key = os.getenv("GROQ_API_KEY")
     if groq_key:
         try:
             client = Groq(api_key=groq_key)
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": full_prompt}
-                ],
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": full_prompt}],
                 temperature=0.2
             )
-            content = response.choices[0].message.content
-            if content:
-                print("Generated code via Groq Free Tier")
-                return clean_code_block(content), "Groq"
+            if response.choices[0].message.content:
+                return clean_code_block(response.choices[0].message.content)
         except Exception as e:
-            print(f"Groq Free Tier failed/exhausted ({str(e)}). Switching to OpenRouter...")
+            print(f"Groq fallback failed: {str(e)}")
 
-    # --- TIER 3: OPENROUTER FREE ROUTER & MODELS ---
+    # Tier 3: OpenRouter
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
-        # OpenRouter's auto-router plus fallback free models
-        free_models = [
-            "openrouter/free",
-            "nvidia/nemotron-3-super-120b-a12b:free",
-            "cohere/north-mini-code:free"
-        ]
-        
-        client = OpenAI(
-            base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
-            api_key=openrouter_key,
-        )
-
-        for model_id in free_models:
+        client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
+        for model_id in ["openrouter/free", "cohere/north-mini-code:free"]:
             try:
                 response = client.chat.completions.create(
                     model=model_id,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": full_prompt}
-                    ],
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": full_prompt}],
                     temperature=0.2
                 )
-                content = response.choices[0].message.content
-                if content:
-                    print(f"Generated code via OpenRouter model: {model_id}")
-                    return clean_code_block(content), f"OpenRouter ({model_id})"
+                if response.choices[0].message.content:
+                    return clean_code_block(response.choices[0].message.content)
             except Exception as e:
-                print(f"OpenRouter model {model_id} failed: {str(e)}. Trying next model...")
+                print(f"OpenRouter model {model_id} failed: {str(e)}")
 
-    raise HTTPException(
-        status_code=500,
-        detail="All free API providers (Gemini, Groq, OpenRouter) are temporarily exhausted."
-    )
+    raise HTTPException(status_code=500, detail="No solution steps provided and AI providers failed.")
 
 @app.get("/")
 def health_check():
-    return {
-        "status": "online",
-        "service": "Tezla Animator - Manim Engine",
-        "version": "1.1.0"
-    }
+    return {"status": "online", "service": "Tezla Animator Engine", "version": "2.0.0"}
 
 @app.post("/generate-video")
 def generate_math_video(req: RenderRequest):
     job_id = str(uuid.uuid4())[:8]
     script_filename = f"temp_{job_id}.py"
 
-    # Step 1: Request Manim Python Code
-    generated_code, used_provider = generate_code_with_fallback(req)
+    # CRITICAL ROUTING CHOICE:
+    if req.solution_steps and len(req.solution_steps) > 0:
+        # Zero API calls, zero quota usage
+        print(f"Rendering job {job_id} directly from provided solution steps...")
+        generated_code = build_direct_manim_script(req.prompt, req.solution_steps)
+        used_provider = "Direct Script (No AI)"
+    else:
+        # Fall back to AI generation ONLY if steps are missing
+        print(f"No solution steps provided for job {job_id}. Falling back to AI...")
+        generated_code = solve_with_ai_fallback(req.prompt)
+        used_provider = "AI Fallback Chain"
 
-    # Step 2: Write script to file
+    # Write code to file
     with open(script_filename, "w", encoding="utf-8") as f:
         f.write(generated_code)
 
-    # Step 3: Render Video via Manim CLI
     video_output_path = os.path.join(OS_OUTPUT_DIR, f"{job_id}.mp4")
 
     manim_cmd = [
@@ -198,15 +203,11 @@ def generate_math_video(req: RenderRequest):
 
     except subprocess.CalledProcessError as err:
         error_msg = err.stderr.decode("utf-8") if err.stderr else str(err)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Manim Rendering Error: {error_msg}"
-        )
+        raise HTTPException(status_code=400, detail=f"Manim Rendering Error: {error_msg}")
     finally:
         if os.path.exists(script_filename):
             os.remove(script_filename)
 
-    # Step 4: Return Video Path URL and Provider Metadata
     return {
         "status": "success",
         "job_id": job_id,
