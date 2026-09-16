@@ -2,10 +2,7 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 
 manim==0.21.0
-manim-voiceover==0.3.7
-edge-tts==6.1.19
-
-setuptools==81.0.0
+edge-tts==7.2.8
 
 google-genai>=1.0.0
 groq>=0.9.0
