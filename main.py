@@ -45,11 +45,11 @@ Rules:
 1. Import statements MUST include:
    from manim import *
    from manim_voiceover import VoiceoverScene
-   from manim_voiceover.services.edge import EdgeService
+   from manim_voiceover.services.edge_tts import EdgeTTSService
 
 2. Define a single scene class named `GeneratedScene(VoiceoverScene)`.
 3. In `construct(self)`:
-   - Initialize voice: `self.set_speech_service(EdgeService(voice="en-NG-EzinneNeural"))`
+   - Initialize voice: `self.set_speech_service(EdgeTTSService(voice="en-NG-EzinneNeural"))`
    - Wrap visual animations in voiceover blocks:
      with self.voiceover(text=r"Explanation text here...") as tracker:
          self.play(Write(eq), run_time=tracker.duration)
@@ -70,11 +70,11 @@ def build_direct_manim_script(prompt: str, steps: List[SolutionStep]) -> str:
 
     script = f'''from manim import *
 from manim_voiceover import VoiceoverScene
-from manim_voiceover.services.edge import EdgeService
+from manim_voiceover.services.edge_tts import EdgeTTSService
 
 class GeneratedScene(VoiceoverScene):
     def construct(self):
-        self.set_speech_service(EdgeService(voice="en-NG-EzinneNeural"))
+        self.set_speech_service(EdgeTTSService(voice="en-NG-EzinneNeural"))
         
         # Display Title / Problem Prompt
         title = Text(r"{clean_prompt}", font_size=36).to_edge(UP)
@@ -156,7 +156,7 @@ def solve_with_ai_fallback(prompt: str) -> str:
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "Tezla Animator Engine", "version": "2.0.3"}
+    return {"status": "online", "service": "Tezla Animator Engine", "version": "2.0.4"}
 
 @app.post("/generate-video")
 def generate_math_video(req: RenderRequest):
