@@ -14,7 +14,7 @@ from openai import OpenAI
 
 app = FastAPI(title="Tezla Animator - Free Tier Engine")
 
-# Enable CORS so your Lovable web app can request this endpoint without browser blocks
+# Enable CORS so Lovable can query without browser blocks
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,7 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Setup directories for static video serving
+# Setup static video folder
 OS_OUTPUT_DIR = "rendered_videos"
 os.makedirs(OS_OUTPUT_DIR, exist_ok=True)
 app.mount("/videos", StaticFiles(directory=OS_OUTPUT_DIR), name="videos")
@@ -59,7 +59,7 @@ def clean_code_block(code_text: str) -> str:
     return cleaned.strip()
 
 def generate_code_with_fallback(prompt: str) -> tuple[str, str]:
-    """Tries Gemini -> Groq -> OpenRouter in sequence."""
+    """Fallback order: Gemini -> Groq -> OpenRouter (Multiple Free Models)"""
     full_prompt = f"{SYSTEM_PROMPT}\n\nGenerate a narrated Manim scene for: {prompt}"
 
     # --- TIER 1: GEMINI FREE TIER ---
@@ -75,7 +75,7 @@ def generate_code_with_fallback(prompt: str) -> tuple[str, str]:
                 print("Generated code via Gemini Free Tier")
                 return clean_code_block(response.text), "Gemini"
         except Exception as e:
-            print(f"Gemini Free Tier error ({str(e)}). Switching to Groq...")
+            print(f"Gemini Free Tier exhausted/failed ({str(e)}). Switching to Groq...")
 
     # --- TIER 2: GROQ FREE TIER ---
     groq_key = os.getenv("GROQ_API_KEY")
@@ -95,39 +95,48 @@ def generate_code_with_fallback(prompt: str) -> tuple[str, str]:
                 print("Generated code via Groq Free Tier")
                 return clean_code_block(content), "Groq"
         except Exception as e:
-            print(f"Groq Free Tier error ({str(e)}). Switching to OpenRouter...")
+            print(f"Groq Free Tier exhausted/failed ({str(e)}). Switching to OpenRouter...")
 
-    # --- TIER 3: OPENROUTER FREE TIER ---
+    # --- TIER 3: OPENROUTER FREE MODELS ROTATION ---
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
-        try:
-            client = OpenAI(
-                base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
-                api_key=openrouter_key,
-            )
-            response = client.chat.completions.create(
-                model="meta-llama/llama-3.3-70b-instruct:free",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Generate a narrated Manim scene for: {prompt}"}
-                ],
-                temperature=0.2
-            )
-            content = response.choices[0].message.content
-            if content:
-                print("Generated code via OpenRouter Free Tier")
-                return clean_code_block(content), "OpenRouter"
-        except Exception as e:
-            print(f"OpenRouter Free Tier error: {str(e)}")
+        # Array of active zero-cost models on OpenRouter
+        free_models = [
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "openai/gpt-oss-20b:free",
+            "qwen/qwen3-next-80b-a3b-instruct:free",
+            "cohere/north-mini-code:free"
+        ]
+        
+        client = OpenAI(
+            base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
+            api_key=openrouter_key,
+        )
+
+        for model_id in free_models:
+            try:
+                response = client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": f"Generate a narrated Manim scene for: {prompt}"}
+                    ],
+                    temperature=0.2
+                )
+                content = response.choices[0].message.content
+                if content:
+                    print(f"Generated code via OpenRouter model: {model_id}")
+                    return clean_code_block(content), f"OpenRouter ({model_id})"
+            except Exception as e:
+                print(f"OpenRouter model {model_id} failed: {str(e)}. Trying next free model...")
 
     raise HTTPException(
         status_code=500,
-        detail="All free AI tiers (Gemini, Groq, OpenRouter) failed or reached rate limits."
+        detail="All free API quotas (Gemini, Groq, OpenRouter) are currently exhausted. Please wait a few minutes."
     )
 
 @app.get("/")
 def health_check():
-    """Root route health check so browser test displays online status."""
     return {
         "status": "online",
         "service": "Tezla Animator - Manim Engine",
