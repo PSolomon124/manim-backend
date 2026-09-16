@@ -1,4 +1,4 @@
-````python
+
 import os
 import re
 import subprocess
@@ -1235,4 +1235,4 @@ def generate_math_video(
             print(
                 f"Could not remove temp script: {e}"
             )
-````
+
