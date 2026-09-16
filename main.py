@@ -45,11 +45,11 @@ Rules:
 1. Import statements MUST include:
    from manim import *
    from manim_voiceover import VoiceoverScene
-   from manim_voiceover.services.edge import EdgeService
+   from manim_voiceover.services.edge_tts import EdgeTTSModel
 
 2. Define a single scene class named `GeneratedScene(VoiceoverScene)`.
 3. In `construct(self)`:
-   - Initialize voice: `self.set_speech_service(EdgeService(voice="en-NG-EzinneNeural"))`
+   - Initialize voice: `self.set_speech_service(EdgeTTSModel(voice="en-NG-EzinneNeural"))`
    - Wrap visual animations in voiceover blocks:
      with self.voiceover(text="Explanation text here...") as tracker:
          self.play(Write(eq), run_time=tracker.duration)
@@ -65,17 +65,15 @@ def clean_code_block(code_text: str) -> str:
 def build_direct_manim_script(prompt: str, steps: List[SolutionStep]) -> str:
     """Generates pure Python Manim code directly from steps without calling any AI model."""
     
-    # Sanitize title prompt string
     clean_prompt = prompt.replace('"', '\\"').replace('\n', ' ')[:40]
 
-    # Header & Imports
     script = f'''from manim import *
 from manim_voiceover import VoiceoverScene
-from manim_voiceover.services.edge import EdgeService
+from manim_voiceover.services.edge_tts import EdgeTTSModel
 
 class GeneratedScene(VoiceoverScene):
     def construct(self):
-        self.set_speech_service(EdgeService(voice="en-NG-EzinneNeural"))
+        self.set_speech_service(EdgeTTSModel(voice="en-NG-EzinneNeural"))
         
         # Display Title / Problem Prompt
         title = Text("{clean_prompt}", font_size=36).to_edge(UP)
@@ -85,12 +83,8 @@ class GeneratedScene(VoiceoverScene):
         current_mobject = None
 '''
 
-    # Build sequence for each step
     for step in steps:
-        # Sanitize explanation text
         clean_explanation = step.explanation.replace('"', '\\"').replace('\n', ' ')
-        
-        # Double-escape backslashes for LaTeX raw string output in generated Python code
         escaped_latex = step.math_latex.replace('\\', '\\\\').replace('"', '\\"')
         
         script += f'''
@@ -115,7 +109,6 @@ class GeneratedScene(VoiceoverScene):
     return script
 
 def solve_with_ai_fallback(prompt: str) -> str:
-    """Fallback generator ONLY used if solution_steps was empty."""
     full_prompt = f"{SYSTEM_PROMPT}\n\nGenerate a narrated Manim scene for: {prompt}"
 
     gemini_key = os.getenv("GEMINI_API_KEY")
@@ -161,7 +154,7 @@ def solve_with_ai_fallback(prompt: str) -> str:
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "Tezla Animator Engine", "version": "2.0.1"}
+    return {"status": "online", "service": "Tezla Animator Engine", "version": "2.0.2"}
 
 @app.post("/generate-video")
 def generate_math_video(req: RenderRequest):
