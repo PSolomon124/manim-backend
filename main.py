@@ -65,8 +65,11 @@ def clean_code_block(code_text: str) -> str:
 def build_direct_manim_script(prompt: str, steps: List[SolutionStep]) -> str:
     """Generates pure Python Manim code directly from steps without calling any AI model."""
     
+    # Sanitize title prompt string
+    clean_prompt = prompt.replace('"', '\\"').replace('\n', ' ')[:40]
+
     # Header & Imports
-    script = """from manim import *
+    script = f'''from manim import *
 from manim_voiceover import VoiceoverScene
 from manim_voiceover.services.edge import EdgeService
 
@@ -75,24 +78,26 @@ class GeneratedScene(VoiceoverScene):
         self.set_speech_service(EdgeService(voice="en-NG-EzinneNeural"))
         
         # Display Title / Problem Prompt
-        title = Text(""" + repr(prompt[:40]) + """, font_size=36).to_edge(UP)
+        title = Text("{clean_prompt}", font_size=36).to_edge(UP)
         self.play(Write(title))
         self.wait(0.5)
         
         current_mobject = None
-"""
+'''
 
     # Build sequence for each step
     for step in steps:
-        clean_explanation = repr(step.explanation)
-        # Escape single backslashes safely for raw LaTeX strings in python script output
-        raw_latex = f'r"{step.math_latex}"'
+        # Sanitize explanation text
+        clean_explanation = step.explanation.replace('"', '\\"').replace('\n', ' ')
         
-        script += f"""
+        # Double-escape backslashes for LaTeX raw string output in generated Python code
+        escaped_latex = step.math_latex.replace('\\', '\\\\').replace('"', '\\"')
+        
+        script += f'''
         # Step {step.step_number}
-        next_mobject = MathTex({raw_latex}, font_size=44)
+        next_mobject = MathTex(r"{escaped_latex}", font_size=44)
         
-        with self.voiceover(text={clean_explanation}) as tracker:
+        with self.voiceover(text="{clean_explanation}") as tracker:
             if current_mobject is None:
                 self.play(Write(next_mobject), run_time=max(1.5, tracker.duration))
             else:
@@ -102,18 +107,17 @@ class GeneratedScene(VoiceoverScene):
             current_mobject = next_mobject
             
         self.wait(0.5)
-"""
+'''
 
-    script += """
+    script += '''
         self.wait(1)
-"""
+'''
     return script
 
 def solve_with_ai_fallback(prompt: str) -> str:
     """Fallback generator ONLY used if solution_steps was empty."""
     full_prompt = f"{SYSTEM_PROMPT}\n\nGenerate a narrated Manim scene for: {prompt}"
 
-    # Tier 1: Gemini
     gemini_key = os.getenv("GEMINI_API_KEY")
     if gemini_key:
         try:
@@ -124,7 +128,6 @@ def solve_with_ai_fallback(prompt: str) -> str:
         except Exception as e:
             print(f"Gemini fallback failed: {str(e)}")
 
-    # Tier 2: Groq
     groq_key = os.getenv("GROQ_API_KEY")
     if groq_key:
         try:
@@ -139,7 +142,6 @@ def solve_with_ai_fallback(prompt: str) -> str:
         except Exception as e:
             print(f"Groq fallback failed: {str(e)}")
 
-    # Tier 3: OpenRouter
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
         client = OpenAI(base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", api_key=openrouter_key)
@@ -159,26 +161,22 @@ def solve_with_ai_fallback(prompt: str) -> str:
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "Tezla Animator Engine", "version": "2.0.0"}
+    return {"status": "online", "service": "Tezla Animator Engine", "version": "2.0.1"}
 
 @app.post("/generate-video")
 def generate_math_video(req: RenderRequest):
     job_id = str(uuid.uuid4())[:8]
     script_filename = f"temp_{job_id}.py"
 
-    # CRITICAL ROUTING CHOICE:
     if req.solution_steps and len(req.solution_steps) > 0:
-        # Zero API calls, zero quota usage
         print(f"Rendering job {job_id} directly from provided solution steps...")
         generated_code = build_direct_manim_script(req.prompt, req.solution_steps)
         used_provider = "Direct Script (No AI)"
     else:
-        # Fall back to AI generation ONLY if steps are missing
         print(f"No solution steps provided for job {job_id}. Falling back to AI...")
         generated_code = solve_with_ai_fallback(req.prompt)
         used_provider = "AI Fallback Chain"
 
-    # Write code to file
     with open(script_filename, "w", encoding="utf-8") as f:
         f.write(generated_code)
 
@@ -203,6 +201,7 @@ def generate_math_video(req: RenderRequest):
 
     except subprocess.CalledProcessError as err:
         error_msg = err.stderr.decode("utf-8") if err.stderr else str(err)
+        print(f"MANIM RENDERING FAILED FOR JOB {job_id}:\n{error_msg}")
         raise HTTPException(status_code=400, detail=f"Manim Rendering Error: {error_msg}")
     finally:
         if os.path.exists(script_filename):
