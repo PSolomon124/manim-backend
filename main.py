@@ -3,6 +3,7 @@ import subprocess
 import uuid
 import re
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -13,6 +14,16 @@ from openai import OpenAI
 
 app = FastAPI(title="Tezla Animator - Free Tier Engine")
 
+# Enable CORS so your Lovable web app can request this endpoint without browser blocks
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Setup directories for static video serving
 OS_OUTPUT_DIR = "rendered_videos"
 os.makedirs(OS_OUTPUT_DIR, exist_ok=True)
 app.mount("/videos", StaticFiles(directory=OS_OUTPUT_DIR), name="videos")
@@ -91,11 +102,10 @@ def generate_code_with_fallback(prompt: str) -> tuple[str, str]:
     if openrouter_key:
         try:
             client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
+                base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
                 api_key=openrouter_key,
             )
             response = client.chat.completions.create(
-                # Appending :free explicitly specifies free-tier routing on OpenRouter
                 model="meta-llama/llama-3.3-70b-instruct:free",
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
@@ -114,6 +124,15 @@ def generate_code_with_fallback(prompt: str) -> tuple[str, str]:
         status_code=500,
         detail="All free AI tiers (Gemini, Groq, OpenRouter) failed or reached rate limits."
     )
+
+@app.get("/")
+def health_check():
+    """Root route health check so browser test displays online status."""
+    return {
+        "status": "online",
+        "service": "Tezla Animator - Manim Engine",
+        "version": "1.0.0"
+    }
 
 @app.post("/generate-video")
 def generate_math_video(req: RenderRequest):
