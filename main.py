@@ -1,3 +1,4 @@
+````python
 import os
 import re
 import subprocess
@@ -27,7 +28,7 @@ from openai import OpenAI
 
 app = FastAPI(
     title="Tezla Animator - Direct & AI Engine",
-    version="3.0.0"
+    version="3.0.1"
 )
 
 app.add_middleware(
@@ -106,15 +107,54 @@ class GeneratedScene(Scene):
 
 6. Do NOT use EdgeTTSService.
 
-7. Mathematical expressions must use raw strings:
+7. Mathematical expressions must use valid LaTeX.
 
-MathTex(r"x^2 + 2x + 1")
+8. When using LaTeX commands, use SINGLE backslashes.
 
-8. Make the animation educational and visually clear.
+CORRECT:
 
-9. Keep mathematical notation correct.
+MathTex(r"\boxed{x = 0 \quad \text{or} \quad x = -4}")
 
-10. Do not place LaTeX commands inside spoken narration.
+INCORRECT:
+
+MathTex(r"\\boxed{x = 0 \\quad \\text{or} \\quad x = -4}")
+
+9. Do NOT put dollar signs inside MathTex.
+
+CORRECT:
+
+MathTex(r"x^2 + 4x = 0")
+
+INCORRECT:
+
+MathTex(r"$x^2 + 4x = 0$")
+
+10. Valid LaTeX commands include:
+
+\boxed{}
+\quad
+\text{}
+\frac{}{}
+\sqrt{}
+\left
+\right
+
+11. Do not write malformed commands such as:
+
+boxed{}
+quad
+text{}
+frac{}{}
+
+12. Keep mathematical notation mathematically correct.
+
+13. Make the animation educational and visually clear.
+
+14. Do not place LaTeX commands inside spoken narration.
+
+15. The script must be executable directly by Manim.
+
+16. Do not use external voiceover packages.
 """
 
 
@@ -147,14 +187,38 @@ def clean_code_block(code_text: str) -> str:
 # ============================================================
 
 def clean_spoken_text(text: str) -> str:
+    """
+    Converts mathematical/LaTeX-heavy text into safe
+    plain spoken narration for Edge TTS.
+    """
 
-    text = text.replace("\\", "")
+    text = text.strip()
+
+    # Remove LaTeX delimiters
+    text = text.replace("$$", "")
     text = text.replace("$", "")
+
+    # Remove LaTeX commands while keeping their content
+    text = re.sub(
+        r"\\(?:boxed|quad|text|frac|sqrt|left|right)\b",
+        "",
+        text
+    )
+
+    # Remove remaining backslashes
+    text = text.replace("\\", "")
+
+    # Remove braces
     text = text.replace("{", "")
     text = text.replace("}", "")
+
+    # Protect against quote problems
     text = text.replace('"', "'")
+
+    # Flatten newlines
     text = text.replace("\n", " ")
 
+    # Normalize whitespace
     text = re.sub(
         r"\s+",
         " ",
@@ -165,27 +229,160 @@ def clean_spoken_text(text: str) -> str:
 
 
 def clean_title(text: str) -> str:
+    """
+    Converts a mathematical prompt into a clean visual title.
 
+    The title is rendered using Text(), not MathTex(),
+    so LaTeX commands must not remain in it.
+    """
+
+    text = text.strip()
+
+    # Remove LaTeX delimiters
+    text = text.replace("$$", "")
+    text = text.replace("$", "")
+
+    # Remove common LaTeX commands
+    text = re.sub(
+        r"\\(?:boxed|quad|text|frac|sqrt|left|right)\b",
+        "",
+        text
+    )
+
+    # Remove remaining backslashes
     text = text.replace("\\", "")
+
+    # Remove braces
+    text = text.replace("{", "")
+    text = text.replace("}", "")
+
+    # Protect generated Python string
     text = text.replace('"', "'")
+
+    # Flatten newlines
     text = text.replace("\n", " ")
 
+    # Normalize whitespace
     text = re.sub(
         r"\s+",
         " ",
         text
     )
 
-    return text[:80]
+    return text[:80].strip()
+
+
+# ============================================================
+# LATEX CLEANING
+# ============================================================
+
+def clean_latex(text: str) -> str:
+    """
+    Cleans and normalizes LaTeX before passing it to MathTex.
+
+    Important:
+    MathTex receives the final LaTeX command with SINGLE
+    backslashes.
+
+    Examples:
+
+        \\boxed{x = 0}
+    becomes:
+        \boxed{x = 0}
+
+    Dollar delimiters are also removed because MathTex
+    does not require them.
+    """
+
+    text = str(text).strip()
+
+    # --------------------------------------------------------
+    # Remove surrounding dollar delimiters
+    # --------------------------------------------------------
+
+    if text.startswith("$$") and text.endswith("$$"):
+        text = text[2:-2]
+
+    elif text.startswith("$") and text.endswith("$"):
+        text = text[1:-1]
+
+    # --------------------------------------------------------
+    # Normalize accidental double/multiple backslashes
+    #
+    # Example:
+    #
+    # \\boxed
+    #
+    # becomes:
+    #
+    # \boxed
+    #
+    # This handles JSON/API escaped LaTeX.
+    # --------------------------------------------------------
+
+    text = re.sub(
+        r"\\\\+",
+        r"\\",
+        text
+    )
+
+    # --------------------------------------------------------
+    # Fix common AI mistakes where the backslash disappeared
+    #
+    # boxed{x} -> \boxed{x}
+    # quad -> \quad
+    # text{...} -> \text{...}
+    # frac{...}{...} -> \frac{...}{...}
+    # sqrt{...} -> \sqrt{...}
+    # --------------------------------------------------------
+
+    latex_commands = [
+        "boxed",
+        "quad",
+        "text",
+        "frac",
+        "sqrt",
+        "left",
+        "right",
+        "begin",
+        "end",
+    ]
+
+    for command in latex_commands:
+
+        text = re.sub(
+            rf"(?<!\\)\b{command}\b",
+            rf"\\{command}",
+            text
+        )
+
+    return text.strip()
 
 
 def escape_latex(text: str) -> str:
+    """
+    Escape LaTeX only for insertion into the generated
+    Python source code.
 
-    return (
-        text
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
-    )
+    IMPORTANT:
+    DO NOT double LaTeX backslashes here.
+
+    The generated source uses:
+
+        r"..."
+
+    which is a Python raw string.
+
+    Therefore:
+
+        \boxed
+        \quad
+        \text
+
+    must remain single-backslash LaTeX commands.
+    """
+
+    return text.replace('"', '\\"')
 
 
 # ============================================================
@@ -253,7 +450,6 @@ def get_audio_duration(
             f"Could not determine audio duration: {e}"
         )
 
-    # Safe fallback
     return 2.5
 
 
@@ -277,6 +473,10 @@ def build_direct_manim_script(
         parents=True,
         exist_ok=True
     )
+
+    # Escape the title for Python source generation.
+    safe_title = clean_prompt.replace("\\", "\\\\")
+    safe_title = safe_title.replace('"', '\\"')
 
     script = f'''
 from manim import *
@@ -355,7 +555,7 @@ class GeneratedScene(Scene):
         # ====================================================
 
         title = Text(
-            r"{clean_prompt}",
+            "{safe_title}",
             font_size=32
         )
 
@@ -378,13 +578,35 @@ class GeneratedScene(Scene):
 
     for step in steps:
 
+        # ----------------------------------------------------
+        # Spoken explanation
+        # ----------------------------------------------------
+
         explanation = clean_spoken_text(
             step.explanation
         )
 
-        latex = escape_latex(
+        safe_explanation = (
+            explanation
+            .replace("\\", "")
+            .replace('"', '\\"')
+        )
+
+        # ----------------------------------------------------
+        # Mathematical expression
+        # ----------------------------------------------------
+
+        cleaned_latex = clean_latex(
             step.math_latex
         )
+
+        latex = escape_latex(
+            cleaned_latex
+        )
+
+        # ----------------------------------------------------
+        # Voice file
+        # ----------------------------------------------------
 
         audio_filename = (
             f"step_{step.step_number}.mp3"
@@ -395,7 +617,7 @@ class GeneratedScene(Scene):
         # STEP {step.step_number}
         # ====================================================
 
-        narration = r"{explanation}"
+        narration = r"{safe_explanation}"
 
         audio_file = generate_voice(
             narration,
@@ -759,7 +981,7 @@ def health_check():
     return {
         "status": "online",
         "service": "Tezla Animator Engine",
-        "version": "3.0.0",
+        "version": "3.0.1",
         "voice_engine": "Edge TTS",
         "voice": "en-NG-EzinneNeural"
     }
@@ -779,7 +1001,10 @@ def engine_test():
         "python": sys.version
     }
 
+    # --------------------------------------------------------
     # Manim
+    # --------------------------------------------------------
+
     try:
 
         manim_result = subprocess.run(
@@ -798,7 +1023,10 @@ def engine_test():
 
         result["manim_error"] = str(e)
 
+    # --------------------------------------------------------
     # Edge TTS
+    # --------------------------------------------------------
+
     try:
 
         import edge_tts
@@ -811,7 +1039,10 @@ def engine_test():
 
         result["edge_tts_error"] = str(e)
 
+    # --------------------------------------------------------
     # FFprobe
+    # --------------------------------------------------------
+
     try:
 
         ffprobe = subprocess.run(
@@ -926,7 +1157,7 @@ def generate_math_video(
                 )
             )
 
-        # Make sure AI never reintroduces
+        # Prevent AI from reintroducing
         # the old broken voiceover package.
         if "manim_voiceover" in generated_code:
 
@@ -1004,3 +1235,4 @@ def generate_math_video(
             print(
                 f"Could not remove temp script: {e}"
             )
+````
