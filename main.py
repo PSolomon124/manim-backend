@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import uuid
+import asyncio
 from pathlib import Path
 from typing import List, Optional
 
@@ -10,19 +11,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+
+# ============================================================
 # AI PROVIDERS
+# ============================================================
+
 from google import genai
 from groq import Groq
 from openai import OpenAI
 
 
 # ============================================================
-# APP CONFIGURATION
+# APP
 # ============================================================
 
 app = FastAPI(
     title="Tezla Animator - Direct & AI Engine",
-    version="2.1.0"
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -42,9 +47,11 @@ BASE_DIR = Path(__file__).resolve().parent
 
 OUTPUT_DIR = BASE_DIR / "rendered_videos"
 MEDIA_DIR = BASE_DIR / "media"
+VOICE_DIR = BASE_DIR / "voiceovers"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+VOICE_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount(
     "/videos",
@@ -54,7 +61,7 @@ app.mount(
 
 
 # ============================================================
-# DATA MODELS
+# MODELS
 # ============================================================
 
 class SolutionStep(BaseModel):
@@ -73,66 +80,49 @@ class RenderRequest(BaseModel):
 # ============================================================
 
 SYSTEM_PROMPT = r"""
-You are a Manim Python script generator for educational mathematics
-and science videos.
+You are a Manim Python script generator for educational videos.
 
 Your output MUST contain ONLY valid Python code.
 
-DO NOT use Markdown.
-DO NOT use ```python.
-DO NOT explain the code outside the Python script.
+Do NOT use Markdown.
+Do NOT use ```python.
+Do NOT explain the code.
 
-The generated code MUST:
+The generated script MUST:
 
 1. Import:
 
 from manim import *
-from manim_voiceover import VoiceoverScene
-from manim_voiceover.services.edge_tts import EdgeTTSService
 
 2. Define exactly one scene:
 
-class GeneratedScene(VoiceoverScene):
+class GeneratedScene(Scene):
 
-3. Inside construct():
+3. Use Manim's normal Scene class.
 
-self.set_speech_service(
-    EdgeTTSService(voice="en-NG-EzinneNeural")
-)
+4. Do NOT import manim_voiceover.
 
-4. Use voiceover blocks for narration.
+5. Do NOT use VoiceoverScene.
 
-Example:
+6. Do NOT use EdgeTTSService.
 
-with self.voiceover(text="Explanation") as tracker:
-    self.play(
-        Write(equation),
-        run_time=max(1.5, tracker.duration)
-    )
-
-5. Use raw strings for LaTeX:
+7. Mathematical expressions must use raw strings:
 
 MathTex(r"x^2 + 2x + 1")
 
-6. Avoid unsupported Manim APIs.
+8. Make the animation educational and visually clear.
 
-7. Make the animation educational, readable and visually clean.
+9. Keep mathematical notation correct.
 
-8. Keep mathematical notation correct.
-
-9. Do not put LaTeX commands directly into spoken narration.
+10. Do not place LaTeX commands inside spoken narration.
 """
 
 
 # ============================================================
-# CLEAN AI OUTPUT
+# CLEAN AI CODE
 # ============================================================
 
 def clean_code_block(code_text: str) -> str:
-    """
-    Removes Markdown code fences if an AI model accidentally
-    returns them.
-    """
 
     code = code_text.strip()
 
@@ -157,71 +147,208 @@ def clean_code_block(code_text: str) -> str:
 # ============================================================
 
 def clean_spoken_text(text: str) -> str:
-    """
-    Converts mathematical explanation into speech-friendly text.
-    """
 
     text = text.replace("\\", "")
     text = text.replace("$", "")
     text = text.replace("{", "")
     text = text.replace("}", "")
-
     text = text.replace('"', "'")
     text = text.replace("\n", " ")
 
-    # Remove excessive spaces
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
 
     return text.strip()
 
 
 def clean_title(text: str) -> str:
-    """
-    Makes the user's prompt safe for Manim Text().
-    """
 
     text = text.replace("\\", "")
     text = text.replace('"', "'")
     text = text.replace("\n", " ")
 
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
 
     return text[:80]
 
 
-def escape_latex(latex: str) -> str:
-    """
-    Escapes quotes while preserving LaTeX backslashes.
-    """
+def escape_latex(text: str) -> str:
 
-    return latex.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        text
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+    )
 
 
 # ============================================================
-# DIRECT MANIM SCRIPT GENERATOR
+# DIRECT EDGE TTS
+# ============================================================
+
+def generate_edge_tts_sync(
+    text: str,
+    output_file: str,
+    voice: str = "en-NG-EzinneNeural"
+):
+
+    import edge_tts
+
+    async def generate():
+
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=voice
+        )
+
+        await communicate.save(
+            output_file
+        )
+
+    asyncio.run(generate())
+
+
+# ============================================================
+# GET AUDIO DURATION
+# ============================================================
+
+def get_audio_duration(
+    audio_file: str
+) -> float:
+
+    try:
+
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                audio_file
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        if result.returncode == 0:
+
+            return max(
+                0.5,
+                float(result.stdout.strip())
+            )
+
+    except Exception as e:
+
+        print(
+            f"Could not determine audio duration: {e}"
+        )
+
+    # Safe fallback
+    return 2.5
+
+
+# ============================================================
+# DIRECT MANIM SCRIPT
 # ============================================================
 
 def build_direct_manim_script(
     prompt: str,
-    steps: List[SolutionStep]
+    steps: List[SolutionStep],
+    job_id: str
 ) -> str:
 
     clean_prompt = clean_title(prompt)
 
-    script = f'''from manim import *
-from manim_voiceover import VoiceoverScene
-from manim_voiceover.services.edge_tts import EdgeTTSService
+    job_voice_dir = (
+        VOICE_DIR / job_id
+    )
+
+    job_voice_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    script = f'''
+from manim import *
+import asyncio
+import subprocess
+from pathlib import Path
+import edge_tts
 
 
-class GeneratedScene(VoiceoverScene):
+VOICE_DIR = Path(r"{job_voice_dir}")
+
+
+def generate_voice(
+    text,
+    filename,
+    voice="en-NG-EzinneNeural"
+):
+
+    output_file = VOICE_DIR / filename
+
+    async def _generate():
+
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=voice
+        )
+
+        await communicate.save(
+            str(output_file)
+        )
+
+    asyncio.run(_generate())
+
+    return output_file
+
+
+def audio_duration(audio_file):
+
+    try:
+
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(audio_file)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        if result.returncode == 0:
+
+            return max(
+                0.5,
+                float(result.stdout.strip())
+            )
+
+    except Exception:
+        pass
+
+    return 2.5
+
+
+class GeneratedScene(Scene):
 
     def construct(self):
-
-        self.set_speech_service(
-            EdgeTTSService(
-                voice="en-NG-EzinneNeural"
-            )
-        )
 
         # ====================================================
         # TITLE
@@ -259,10 +386,26 @@ class GeneratedScene(VoiceoverScene):
             step.math_latex
         )
 
+        audio_filename = (
+            f"step_{step.step_number}.mp3"
+        )
+
         script += f'''
         # ====================================================
         # STEP {step.step_number}
         # ====================================================
+
+        narration = r"{explanation}"
+
+        audio_file = generate_voice(
+            narration,
+            "{audio_filename}",
+            voice="en-NG-EzinneNeural"
+        )
+
+        duration = audio_duration(
+            audio_file
+        )
 
         next_mobject = MathTex(
             r"{latex}",
@@ -271,36 +414,31 @@ class GeneratedScene(VoiceoverScene):
 
         next_mobject.move_to(ORIGIN)
 
-        with self.voiceover(
-            text=r"{explanation}"
-        ) as tracker:
+        # Add narration to the video
+        self.add_sound(
+            str(audio_file)
+        )
 
-            if current_mobject is None:
+        if current_mobject is None:
 
-                self.play(
-                    Write(next_mobject),
-                    run_time=max(
-                        1.5,
-                        tracker.duration
-                    )
-                )
+            self.play(
+                Write(next_mobject),
+                run_time=duration
+            )
 
-            else:
+        else:
 
-                self.play(
-                    Transform(
-                        current_mobject,
-                        next_mobject
-                    ),
-                    run_time=max(
-                        1.5,
-                        tracker.duration
-                    )
-                )
+            self.play(
+                Transform(
+                    current_mobject,
+                    next_mobject
+                ),
+                run_time=duration
+            )
 
         current_mobject = next_mobject
 
-        self.wait(0.4)
+        self.wait(0.2)
 
 '''
 
@@ -315,12 +453,14 @@ class GeneratedScene(VoiceoverScene):
 # AI FALLBACK
 # ============================================================
 
-def solve_with_ai_fallback(prompt: str) -> str:
+def solve_with_ai_fallback(
+    prompt: str
+) -> str:
 
     full_prompt = f"""
 {SYSTEM_PROMPT}
 
-Generate a narrated educational Manim scene for:
+Generate an educational Manim scene for:
 
 {prompt}
 """
@@ -329,7 +469,9 @@ Generate a narrated educational Manim scene for:
     # GEMINI
     # --------------------------------------------------------
 
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = os.getenv(
+        "GEMINI_API_KEY"
+    )
 
     if gemini_key:
 
@@ -348,8 +490,6 @@ Generate a narrated educational Manim scene for:
 
             if response.text:
 
-                print("Gemini generated the script.")
-
                 return clean_code_block(
                     response.text
                 )
@@ -357,14 +497,16 @@ Generate a narrated educational Manim scene for:
         except Exception as e:
 
             print(
-                f"Gemini fallback failed: {e}"
+                f"Gemini failed: {e}"
             )
 
     # --------------------------------------------------------
     # GROQ
     # --------------------------------------------------------
 
-    groq_key = os.getenv("GROQ_API_KEY")
+    groq_key = os.getenv(
+        "GROQ_API_KEY"
+    )
 
     if groq_key:
 
@@ -391,11 +533,14 @@ Generate a narrated educational Manim scene for:
                 temperature=0.2
             )
 
-            content = response.choices[0].message.content
+            content = (
+                response
+                .choices[0]
+                .message
+                .content
+            )
 
             if content:
-
-                print("Groq generated the script.")
 
                 return clean_code_block(
                     content
@@ -404,7 +549,7 @@ Generate a narrated educational Manim scene for:
         except Exception as e:
 
             print(
-                f"Groq fallback failed: {e}"
+                f"Groq failed: {e}"
             )
 
     # --------------------------------------------------------
@@ -418,8 +563,6 @@ Generate a narrated educational Manim scene for:
     if openrouter_key:
 
         try:
-
-            print("Trying OpenRouter...")
 
             client = OpenAI(
                 base_url="https://openrouter.ai/api/v1",
@@ -436,7 +579,7 @@ Generate a narrated educational Manim scene for:
                 try:
 
                     print(
-                        f"Trying OpenRouter model: {model_id}"
+                        f"Trying {model_id}"
                     )
 
                     response = client.chat.completions.create(
@@ -463,10 +606,6 @@ Generate a narrated educational Manim scene for:
 
                     if content:
 
-                        print(
-                            f"OpenRouter succeeded with {model_id}"
-                        )
-
                         return clean_code_block(
                             content
                         )
@@ -474,27 +613,25 @@ Generate a narrated educational Manim scene for:
                 except Exception as e:
 
                     print(
-                        f"OpenRouter model "
                         f"{model_id} failed: {e}"
                     )
 
         except Exception as e:
 
             print(
-                f"OpenRouter initialization failed: {e}"
+                f"OpenRouter failed: {e}"
             )
 
     raise HTTPException(
         status_code=500,
         detail=(
-            "No solution steps were provided and "
-            "all AI providers failed."
+            "All AI providers failed."
         )
     )
 
 
 # ============================================================
-# MANIM RENDER FUNCTION
+# MANIM RENDER
 # ============================================================
 
 def render_manim_script(
@@ -505,6 +642,7 @@ def render_manim_script(
     manim_cmd = [
         "manim",
         "-ql",
+        "--disable_caching",
         "--media_dir",
         str(MEDIA_DIR),
         str(script_path),
@@ -540,8 +678,7 @@ def render_manim_script(
         raise HTTPException(
             status_code=504,
             detail=(
-                "Manim rendering timed out "
-                "after 10 minutes."
+                "Manim rendering timed out."
             )
         )
 
@@ -571,13 +708,13 @@ def render_manim_script(
             status_code=400,
             detail=(
                 "Manim Rendering Error:\n"
-                + error_msg[-10000:]
+                + error_msg[-12000:]
             )
         )
 
-    # --------------------------------------------------------
-    # Find GeneratedScene.mp4
-    # --------------------------------------------------------
+    # ========================================================
+    # FIND VIDEO
+    # ========================================================
 
     possible_outputs = list(
         MEDIA_DIR.rglob(
@@ -590,7 +727,7 @@ def render_manim_script(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Manim finished but "
+                "Manim completed but "
                 "GeneratedScene.mp4 was not found."
             )
         )
@@ -602,7 +739,6 @@ def render_manim_script(
         f"{job_id}.mp4"
     )
 
-    # Remove old output if it exists
     if final_video.exists():
         final_video.unlink()
 
@@ -623,10 +759,9 @@ def health_check():
     return {
         "status": "online",
         "service": "Tezla Animator Engine",
-        "version": "2.1.0",
-        "manim": "0.21.0",
-        "voiceover": "0.3.7",
-        "tts": "Edge TTS"
+        "version": "3.0.0",
+        "voice_engine": "Edge TTS",
+        "voice": "en-NG-EzinneNeural"
     }
 
 
@@ -637,45 +772,70 @@ def health_check():
 @app.get("/engine-test")
 def engine_test():
 
+    import sys
+
+    result = {
+        "status": "ok",
+        "python": sys.version
+    }
+
+    # Manim
     try:
 
         manim_result = subprocess.run(
-            [
-                "manim",
-                "--version"
-            ],
+            ["manim", "--version"],
             capture_output=True,
             text=True,
             timeout=30
         )
 
-        return {
-            "status": "ok",
-            "manim_version": manim_result.stdout.strip(),
-            "python_version": (
-                subprocess
-                .run(
-                    [
-                        "python",
-                        "--version"
-                    ],
-                    capture_output=True,
-                    text=True
-                )
-                .stdout.strip()
-            )
-        }
+        result["manim"] = (
+            manim_result.stdout.strip()
+            or manim_result.stderr.strip()
+        )
 
     except Exception as e:
 
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
+        result["manim_error"] = str(e)
+
+    # Edge TTS
+    try:
+
+        import edge_tts
+
+        result["edge_tts"] = (
+            edge_tts.__version__
         )
+
+    except Exception as e:
+
+        result["edge_tts_error"] = str(e)
+
+    # FFprobe
+    try:
+
+        ffprobe = subprocess.run(
+            ["ffprobe", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        result["ffprobe"] = (
+            ffprobe.stdout.splitlines()[0]
+            if ffprobe.stdout
+            else "available"
+        )
+
+    except Exception as e:
+
+        result["ffprobe_error"] = str(e)
+
+    return result
 
 
 # ============================================================
-# VIDEO GENERATION ENDPOINT
+# GENERATE VIDEO
 # ============================================================
 
 @app.post("/generate-video")
@@ -699,7 +859,7 @@ def generate_math_video(
     try:
 
         # ====================================================
-        # GENERATE SCRIPT
+        # DIRECT SOLUTION STEPS
         # ====================================================
 
         if (
@@ -715,19 +875,23 @@ def generate_math_video(
             generated_code = (
                 build_direct_manim_script(
                     req.prompt,
-                    req.solution_steps
+                    req.solution_steps,
+                    job_id
                 )
             )
 
             used_provider = (
-                "Direct Script (No AI)"
+                "Direct Script + Edge TTS"
             )
+
+        # ====================================================
+        # AI FALLBACK
+        # ====================================================
 
         else:
 
             print(
                 f"[{job_id}] "
-                "No solution steps. "
                 "Using AI fallback."
             )
 
@@ -742,17 +906,16 @@ def generate_math_video(
             )
 
         # ====================================================
-        # BASIC SCRIPT VALIDATION
+        # VALIDATE
         # ====================================================
 
         if not generated_code.strip():
 
             raise HTTPException(
                 status_code=500,
-                detail="Generated Python script is empty."
+                detail="Generated script is empty."
             )
 
-        # Ensure GeneratedScene exists
         if "class GeneratedScene" not in generated_code:
 
             raise HTTPException(
@@ -763,8 +926,21 @@ def generate_math_video(
                 )
             )
 
+        # Make sure AI never reintroduces
+        # the old broken voiceover package.
+        if "manim_voiceover" in generated_code:
+
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Generated script attempted to use "
+                    "manim_voiceover. The current engine "
+                    "uses direct Edge TTS."
+                )
+            )
+
         # ====================================================
-        # SAVE SCRIPT
+        # SAVE
         # ====================================================
 
         script_path.write_text(
@@ -773,8 +949,8 @@ def generate_math_video(
         )
 
         print(
-            f"[{job_id}] Script saved to "
-            f"{script_path}"
+            f"[{job_id}] "
+            f"Script saved to {script_path}"
         )
 
         # ====================================================
@@ -787,7 +963,7 @@ def generate_math_video(
         )
 
         # ====================================================
-        # RESPONSE
+        # SUCCESS
         # ====================================================
 
         return {
@@ -800,12 +976,14 @@ def generate_math_video(
         }
 
     except HTTPException:
+
         raise
 
     except Exception as e:
 
         print(
-            f"[{job_id}] Unexpected error: {e}"
+            f"[{job_id}] "
+            f"Unexpected error: {e}"
         )
 
         raise HTTPException(
@@ -815,19 +993,14 @@ def generate_math_video(
 
     finally:
 
-        # ====================================================
-        # CLEAN TEMP PYTHON SCRIPT
-        # ====================================================
-
+        # Remove temporary Python file
         try:
 
             if script_path.exists():
-
                 script_path.unlink()
 
-        except Exception as cleanup_error:
+        except Exception as e:
 
             print(
-                "Could not remove temporary "
-                f"script: {cleanup_error}"
+                f"Could not remove temp script: {e}"
             )
