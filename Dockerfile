@@ -1,9 +1,9 @@
-# Use official Manim image with LaTeX and FFmpeg pre-installed
-FROM manimcommunity/manim:v0.18.0
+# Base image with Manim, LaTeX, and Cairo pre-installed
+FROM manimcommunity/manim:latest
 
 USER root
 
-# Install system dependencies needed for manim-voiceover audio processing
+# Install system dependencies required for Edge-TTS audio processing & FFmpeg rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     sox \
@@ -13,18 +13,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirement file and install Python packages
+# Install Python requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application files into the container
 COPY . .
 
-# Set output folder permissions so FastAPI can write rendered videos
+# Ensure storage directories exist with write permissions for FastAPI and Manim
 RUN mkdir -p /app/rendered_videos /app/media && \
     chmod -R 777 /app/rendered_videos /app/media
 
 EXPOSE 10000
 
-# Start FastAPI server on Render's default port 10000
+# Launch FastAPI application on Render's default port
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
