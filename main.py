@@ -1,21 +1,17 @@
-
 import os
 import re
 import subprocess
 import uuid
-import asyncio
+import ast
 from pathlib import Path
 from typing import List, Optional
+
+import sympy as sp
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
-
-# ============================================================
-# AI PROVIDERS
-# ============================================================
 
 from google import genai
 from groq import Groq
@@ -26,10 +22,13 @@ from openai import OpenAI
 # APP
 # ============================================================
 
+APP_VERSION = "3.1.0"
+
 app = FastAPI(
     title="Tezla Animator - Direct & AI Engine",
-    version="3.0.1"
+    version=APP_VERSION,
 )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,10 +53,11 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 VOICE_DIR.mkdir(parents=True, exist_ok=True)
 
+
 app.mount(
     "/videos",
     StaticFiles(directory=str(OUTPUT_DIR)),
-    name="videos"
+    name="videos",
 )
 
 
@@ -73,7 +73,22 @@ class SolutionStep(BaseModel):
 
 class RenderRequest(BaseModel):
     prompt: str
+
+    # Existing Lovable payload
     solution_steps: Optional[List[SolutionStep]] = None
+
+    # Optional deterministic mathematics input
+    # Example:
+    # "x**3 - 3*x"
+    math_expression: Optional[str] = None
+
+    # Optional operation:
+    # derivative
+    # integral
+    # simplify
+    # factor
+    # solve
+    operation: Optional[str] = None
 
 
 # ============================================================
@@ -86,7 +101,9 @@ You are a Manim Python script generator for educational videos.
 Your output MUST contain ONLY valid Python code.
 
 Do NOT use Markdown.
+
 Do NOT use ```python.
+
 Do NOT explain the code.
 
 The generated script MUST:
@@ -107,9 +124,11 @@ class GeneratedScene(Scene):
 
 6. Do NOT use EdgeTTSService.
 
-7. Mathematical expressions must use valid LaTeX.
+7. Do NOT generate audio.
 
-8. When using LaTeX commands, use SINGLE backslashes.
+8. Mathematical expressions must use valid LaTeX.
+
+9. When using LaTeX commands, use SINGLE backslashes.
 
 CORRECT:
 
@@ -117,9 +136,9 @@ MathTex(r"\boxed{x = 0 \quad \text{or} \quad x = -4}")
 
 INCORRECT:
 
-MathTex(r"\\boxed{x = 0 \\quad \\text{or} \\quad x = -4}")
+MathTex(r"\\boxed{x = 0 \\quad \\text{or} \\quad x = -4")
 
-9. Do NOT put dollar signs inside MathTex.
+10. Do NOT put dollar signs inside MathTex.
 
 CORRECT:
 
@@ -129,7 +148,7 @@ INCORRECT:
 
 MathTex(r"$x^2 + 4x = 0$")
 
-10. Valid LaTeX commands include:
+11. Valid LaTeX commands include:
 
 \boxed{}
 \quad
@@ -139,22 +158,29 @@ MathTex(r"$x^2 + 4x = 0$")
 \left
 \right
 
-11. Do not write malformed commands such as:
+12. Do not write malformed commands such as:
 
 boxed{}
 quad
 text{}
 frac{}{}
+sqrt{}
 
-12. Keep mathematical notation mathematically correct.
+13. Keep mathematical notation mathematically correct.
 
-13. Make the animation educational and visually clear.
+14. Make the animation educational and visually clear.
 
-14. Do not place LaTeX commands inside spoken narration.
-
-15. The script must be executable directly by Manim.
+15. Do not place LaTeX commands inside spoken narration.
 
 16. Do not use external voiceover packages.
+
+17. Do not create audio files.
+
+18. Keep the animation self-contained.
+
+19. The script must be executable directly by Manim.
+
+20. Return Python code only.
 """
 
 
@@ -163,20 +189,27 @@ frac{}{}
 # ============================================================
 
 def clean_code_block(code_text: str) -> str:
+    """
+    Removes accidental Markdown code fences from AI output.
+    """
+
+    if not code_text:
+        return ""
 
     code = code_text.strip()
 
     code = re.sub(
-        r"^```(?:python)?\s*",
+        r"^\s*```(?:python|py)?\s*",
         "",
         code,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
 
     code = re.sub(
-        r"\s*```$",
+        r"\s*```\s*$",
         "",
-        code
+        code,
+        flags=re.IGNORECASE,
     )
 
     return code.strip()
@@ -189,87 +222,67 @@ def clean_code_block(code_text: str) -> str:
 def clean_spoken_text(text: str) -> str:
     """
     Converts mathematical/LaTeX-heavy text into safe
-    plain spoken narration for Edge TTS.
+    plain text.
+
+    This is only used for text that may be displayed
+    visually or returned to the frontend.
     """
 
-    text = text.strip()
+    if not text:
+        return ""
 
-    # Remove LaTeX delimiters
+    text = str(text).strip()
+
     text = text.replace("$$", "")
     text = text.replace("$", "")
 
-    # Remove LaTeX commands while keeping their content
     text = re.sub(
         r"\\(?:boxed|quad|text|frac|sqrt|left|right)\b",
         "",
-        text
+        text,
     )
 
-    # Remove remaining backslashes
     text = text.replace("\\", "")
-
-    # Remove braces
     text = text.replace("{", "")
     text = text.replace("}", "")
 
-    # Protect against quote problems
     text = text.replace('"', "'")
-
-    # Flatten newlines
     text = text.replace("\n", " ")
 
-    # Normalize whitespace
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
+    text = re.sub(r"\s+", " ", text)
 
     return text.strip()
 
 
 def clean_title(text: str) -> str:
     """
-    Converts a mathematical prompt into a clean visual title.
-
-    The title is rendered using Text(), not MathTex(),
-    so LaTeX commands must not remain in it.
+    Cleans a prompt before putting it inside Manim Text().
     """
 
-    text = text.strip()
+    if not text:
+        return "Mathematics Solution"
 
-    # Remove LaTeX delimiters
+    text = str(text).strip()
+
     text = text.replace("$$", "")
     text = text.replace("$", "")
 
-    # Remove common LaTeX commands
     text = re.sub(
         r"\\(?:boxed|quad|text|frac|sqrt|left|right)\b",
         "",
-        text
+        text,
     )
 
-    # Remove remaining backslashes
     text = text.replace("\\", "")
-
-    # Remove braces
     text = text.replace("{", "")
     text = text.replace("}", "")
 
-    # Protect generated Python string
     text = text.replace('"', "'")
-
-    # Flatten newlines
     text = text.replace("\n", " ")
 
-    # Normalize whitespace
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
+    text = re.sub(r"\s+", " ", text)
 
-    return text[:80].strip()
+    return text[:100].strip()
 
 
 # ============================================================
@@ -278,64 +291,41 @@ def clean_title(text: str) -> str:
 
 def clean_latex(text: str) -> str:
     """
-    Cleans and normalizes LaTeX before passing it to MathTex.
+    Normalizes AI/Lovable LaTeX.
 
     Important:
-    MathTex receives the final LaTeX command with SINGLE
-    backslashes.
+    MathTex receives SINGLE backslashes.
 
-    Examples:
+    Example:
 
-        \\boxed{x = 0}
+        \\boxed{x=0}
+
     becomes:
-        \boxed{x = 0}
 
-    Dollar delimiters are also removed because MathTex
-    does not require them.
+        \boxed{x=0}
     """
+
+    if not text:
+        return r"\text{No expression}"
 
     text = str(text).strip()
 
-    # --------------------------------------------------------
-    # Remove surrounding dollar delimiters
-    # --------------------------------------------------------
-
+    # Remove surrounding dollar delimiters.
     if text.startswith("$$") and text.endswith("$$"):
         text = text[2:-2]
 
     elif text.startswith("$") and text.endswith("$"):
         text = text[1:-1]
 
-    # --------------------------------------------------------
-    # Normalize accidental double/multiple backslashes
+    # Collapse repeated backslashes.
     #
-    # Example:
+    # Four backslashes -> one
+    # Three backslashes -> one
+    # Two backslashes -> one
     #
-    # \\boxed
-    #
-    # becomes:
-    #
-    # \boxed
-    #
-    # This handles JSON/API escaped LaTeX.
-    # --------------------------------------------------------
+    text = re.sub(r"\\{2,}", r"\\", text)
 
-    text = re.sub(
-        r"\\\\+",
-        r"\\",
-        text
-    )
-
-    # --------------------------------------------------------
-    # Fix common AI mistakes where the backslash disappeared
-    #
-    # boxed{x} -> \boxed{x}
-    # quad -> \quad
-    # text{...} -> \text{...}
-    # frac{...}{...} -> \frac{...}{...}
-    # sqrt{...} -> \sqrt{...}
-    # --------------------------------------------------------
-
+    # Repair common commands where the backslash was lost.
     latex_commands = [
         "boxed",
         "quad",
@@ -349,326 +339,440 @@ def clean_latex(text: str) -> str:
     ]
 
     for command in latex_commands:
-
         text = re.sub(
             rf"(?<!\\)\b{command}\b",
             rf"\\{command}",
-            text
+            text,
         )
 
     return text.strip()
 
 
-def escape_latex(text: str) -> str:
+def escape_latex_for_python(text: str) -> str:
     """
-    Escape LaTeX only for insertion into the generated
-    Python source code.
+    Escapes only double quotes.
 
     IMPORTANT:
-    DO NOT double LaTeX backslashes here.
-
-    The generated source uses:
-
-        r"..."
-
-    which is a Python raw string.
-
-    Therefore:
-
-        \boxed
-        \quad
-        \text
-
-    must remain single-backslash LaTeX commands.
+    Backslashes MUST NOT be doubled here because the generated
+    Manim code uses raw Python strings.
     """
 
     return text.replace('"', '\\"')
 
 
 # ============================================================
-# DIRECT EDGE TTS
+# SYMPY MATH ENGINE
 # ============================================================
 
-def generate_edge_tts_sync(
-    text: str,
-    output_file: str,
-    voice: str = "en-NG-EzinneNeural"
-):
+def safe_sympify(expression: str):
+    """
+    Converts a basic mathematical expression into SymPy.
 
-    import edge_tts
+    This uses a controlled namespace rather than allowing
+    unrestricted names.
+    """
 
-    async def generate():
+    if not expression:
+        raise ValueError("Mathematical expression is empty.")
 
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=voice
+    expression = str(expression).strip()
+
+    if len(expression) > 500:
+        raise ValueError(
+            "Mathematical expression is too long."
         )
 
-        await communicate.save(
-            output_file
-        )
+    allowed = {
+        "x": sp.Symbol("x"),
+        "y": sp.Symbol("y"),
+        "z": sp.Symbol("z"),
 
-    asyncio.run(generate())
+        "pi": sp.pi,
+        "E": sp.E,
 
+        "sin": sp.sin,
+        "cos": sp.cos,
+        "tan": sp.tan,
 
-# ============================================================
-# GET AUDIO DURATION
-# ============================================================
+        "asin": sp.asin,
+        "acos": sp.acos,
+        "atan": sp.atan,
 
-def get_audio_duration(
-    audio_file: str
-) -> float:
+        "sqrt": sp.sqrt,
+        "log": sp.log,
+        "exp": sp.exp,
+
+        "Abs": sp.Abs,
+    }
 
     try:
-
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                audio_file
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
+        return sp.sympify(
+            expression,
+            locals=allowed,
+            evaluate=True,
+        )
+    except Exception as e:
+        raise ValueError(
+            f"Could not parse mathematical expression: {e}"
         )
 
-        if result.returncode == 0:
 
-            return max(
-                0.5,
-                float(result.stdout.strip())
+def calculate_with_sympy(
+    expression: str,
+    operation: str = "derivative",
+) -> dict:
+    """
+    Performs deterministic mathematical calculations.
+
+    Supported operations:
+
+    derivative
+    integral
+    simplify
+    factor
+    solve
+    """
+
+    expr = safe_sympify(expression)
+
+    x = sp.Symbol("x")
+
+    operation = (
+        operation or "derivative"
+    ).strip().lower()
+
+    result = {
+        "original": str(expr),
+        "original_latex": sp.latex(expr),
+        "operation": operation,
+    }
+
+    if operation in {
+        "derivative",
+        "differentiate",
+        "diff",
+    }:
+
+        result_expr = sp.diff(expr, x)
+
+        result["result"] = str(result_expr)
+        result["result_latex"] = sp.latex(
+            result_expr
+        )
+
+        critical_points = sp.solve(
+            sp.Eq(result_expr, 0),
+            x,
+        )
+
+        result["critical_points"] = [
+            str(point)
+            for point in critical_points
+        ]
+
+        result["critical_points_latex"] = [
+            sp.latex(point)
+            for point in critical_points
+        ]
+
+    elif operation in {
+        "integral",
+        "integrate",
+    }:
+
+        result_expr = sp.integrate(
+            expr,
+            x,
+        )
+
+        result["result"] = str(result_expr)
+        result["result_latex"] = sp.latex(
+            result_expr
+        )
+
+    elif operation == "simplify":
+
+        result_expr = sp.simplify(expr)
+
+        result["result"] = str(result_expr)
+        result["result_latex"] = sp.latex(
+            result_expr
+        )
+
+    elif operation == "factor":
+
+        result_expr = sp.factor(expr)
+
+        result["result"] = str(result_expr)
+        result["result_latex"] = sp.latex(
+            result_expr
+        )
+
+    elif operation == "solve":
+
+        solutions = sp.solve(
+            expr,
+            x,
+        )
+
+        result["solutions"] = [
+            str(solution)
+            for solution in solutions
+        ]
+
+        result["solutions_latex"] = [
+            sp.latex(solution)
+            for solution in solutions
+        ]
+
+    else:
+
+        raise ValueError(
+            f"Unsupported SymPy operation: {operation}"
+        )
+
+    return result
+
+
+def build_sympy_solution_steps(
+    expression: str,
+    operation: str = "derivative",
+) -> List[SolutionStep]:
+    """
+    Creates deterministic mathematical steps from SymPy.
+
+    This is useful when Lovable does not already send
+    solution_steps.
+
+    Narration can still be generated by Lovable.
+    """
+
+    data = calculate_with_sympy(
+        expression,
+        operation,
+    )
+
+    steps = []
+
+    steps.append(
+        SolutionStep(
+            step_number=1,
+            math_latex=(
+                rf"f(x) = {data['original_latex']}"
+            ),
+            explanation=(
+                f"Consider the function "
+                f"{data['original']}."
+            ),
+        )
+    )
+
+    if operation in {
+        "derivative",
+        "differentiate",
+        "diff",
+    }:
+
+        steps.append(
+            SolutionStep(
+                step_number=2,
+                math_latex=(
+                    rf"f'(x) = "
+                    rf"{data['result_latex']}"
+                ),
+                explanation=(
+                    "Taking the derivative gives "
+                    f"{data['result']}."
+                ),
+            )
+        )
+
+        if data.get("critical_points"):
+
+            points_latex = (
+                r"\quad".join(
+                    data["critical_points_latex"]
+                )
             )
 
-    except Exception as e:
+            points_text = ", ".join(
+                data["critical_points"]
+            )
 
-        print(
-            f"Could not determine audio duration: {e}"
+            steps.append(
+                SolutionStep(
+                    step_number=3,
+                    math_latex=(
+                        rf"f'(x)=0"
+                        rf"\quad\Rightarrow\quad"
+                        rf"x = {points_latex}"
+                    ),
+                    explanation=(
+                        "Setting the derivative equal "
+                        f"to zero gives the critical "
+                        f"points {points_text}."
+                    ),
+                )
+            )
+
+    else:
+
+        steps.append(
+            SolutionStep(
+                step_number=2,
+                math_latex=(
+                    data.get(
+                        "result_latex",
+                        r"\text{Result}",
+                    )
+                ),
+                explanation=(
+                    f"The {operation} of the "
+                    "expression gives "
+                    f"{data.get('result', '')}."
+                ),
+            )
         )
 
-    return 2.5
+    return steps
 
 
 # ============================================================
-# DIRECT MANIM SCRIPT
+# MANIM SCRIPT BUILDER
 # ============================================================
 
 def build_direct_manim_script(
     prompt: str,
     steps: List[SolutionStep],
-    job_id: str
+    job_id: str,
 ) -> str:
 
     clean_prompt = clean_title(prompt)
 
-    job_voice_dir = (
-        VOICE_DIR / job_id
+    safe_title = (
+        clean_prompt
+        .replace("\\", "")
+        .replace('"', '\\"')
     )
 
-    job_voice_dir.mkdir(
-        parents=True,
-        exist_ok=True
+    script_parts = []
+
+    script_parts.append(
+        "from manim import *"
     )
 
-    # Escape the title for Python source generation.
-    safe_title = clean_prompt.replace("\\", "\\\\")
-    safe_title = safe_title.replace('"', '\\"')
+    script_parts.append("")
 
-    script = f'''
-from manim import *
-import asyncio
-import subprocess
-from pathlib import Path
-import edge_tts
+    script_parts.append(
+        "class GeneratedScene(Scene):"
+    )
 
+    script_parts.append(
+        "    def construct(self):"
+    )
 
-VOICE_DIR = Path(r"{job_voice_dir}")
+    script_parts.append(
+        f'        title = Text("{safe_title}", font_size=32)'
+    )
 
+    script_parts.append(
+        "        title.to_edge(UP)"
+    )
 
-def generate_voice(
-    text,
-    filename,
-    voice="en-NG-EzinneNeural"
-):
+    script_parts.append(
+        "        self.play(Write(title), run_time=1.2)"
+    )
 
-    output_file = VOICE_DIR / filename
+    script_parts.append(
+        "        self.wait(0.4)"
+    )
 
-    async def _generate():
+    script_parts.append(
+        "        current_mobject = None"
+    )
 
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=voice
+    script_parts.append("")
+
+    for index, step in enumerate(steps):
+
+        cleaned_latex = clean_latex(
+            step.math_latex
         )
 
-        await communicate.save(
-            str(output_file)
+        latex = escape_latex_for_python(
+            cleaned_latex
         )
 
-    asyncio.run(_generate())
-
-    return output_file
-
-
-def audio_duration(audio_file):
-
-    try:
-
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(audio_file)
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if result.returncode == 0:
-
-            return max(
-                0.5,
-                float(result.stdout.strip())
-            )
-
-    except Exception:
-        pass
-
-    return 2.5
-
-
-class GeneratedScene(Scene):
-
-    def construct(self):
-
-        # ====================================================
-        # TITLE
-        # ====================================================
-
-        title = Text(
-            "{safe_title}",
-            font_size=32
-        )
-
-        title.to_edge(UP)
-
-        self.play(
-            Write(title),
-            run_time=1.5
-        )
-
-        self.wait(0.5)
-
-        current_mobject = None
-
-'''
-
-    # ========================================================
-    # STEPS
-    # ========================================================
-
-    for step in steps:
-
-        # ----------------------------------------------------
-        # Spoken explanation
-        # ----------------------------------------------------
-
+        # Keep the explanation available as a comment.
+        # Lovable remains responsible for narration.
         explanation = clean_spoken_text(
             step.explanation
         )
 
         safe_explanation = (
             explanation
-            .replace("\\", "")
-            .replace('"', '\\"')
+            .replace('"', "'")
+            .replace("\n", " ")
         )
 
-        # ----------------------------------------------------
-        # Mathematical expression
-        # ----------------------------------------------------
+        step_number = step.step_number
 
-        cleaned_latex = clean_latex(
-            step.math_latex
+        script_parts.append(
+            f"        # Step {step_number}"
         )
 
-        latex = escape_latex(
-            cleaned_latex
+        script_parts.append(
+            f"        # Narration from Lovable: "
+            f"{safe_explanation}"
         )
 
-        # ----------------------------------------------------
-        # Voice file
-        # ----------------------------------------------------
-
-        audio_filename = (
-            f"step_{step.step_number}.mp3"
+        script_parts.append(
+            f'        next_mobject = MathTex('
+            f'r"{latex}", '
+            f'font_size=44'
+            f')'
         )
 
-        script += f'''
-        # ====================================================
-        # STEP {step.step_number}
-        # ====================================================
-
-        narration = r"{safe_explanation}"
-
-        audio_file = generate_voice(
-            narration,
-            "{audio_filename}",
-            voice="en-NG-EzinneNeural"
+        script_parts.append(
+            "        next_mobject.move_to(ORIGIN)"
         )
 
-        duration = audio_duration(
-            audio_file
-        )
+        if index == 0:
 
-        next_mobject = MathTex(
-            r"{latex}",
-            font_size=44
-        )
-
-        next_mobject.move_to(ORIGIN)
-
-        # Add narration to the video
-        self.add_sound(
-            str(audio_file)
-        )
-
-        if current_mobject is None:
-
-            self.play(
-                Write(next_mobject),
-                run_time=duration
+            script_parts.append(
+                "        self.play("
+                "Write(next_mobject), "
+                "run_time=1.5"
+                ")"
             )
 
         else:
 
-            self.play(
-                Transform(
-                    current_mobject,
-                    next_mobject
-                ),
-                run_time=duration
+            script_parts.append(
+                "        self.play("
+                "Transform("
+                "current_mobject, "
+                "next_mobject"
+                "), "
+                "run_time=1.5"
+                ")"
             )
 
-        current_mobject = next_mobject
+        script_parts.append(
+            "        current_mobject = next_mobject"
+        )
 
-        self.wait(0.2)
+        script_parts.append(
+            "        self.wait(1.2)"
+        )
 
-'''
+        script_parts.append("")
 
-    script += '''
-        self.wait(1.5)
-'''
+    script_parts.append(
+        "        self.wait(1.5)"
+    )
 
-    return script
+    return "\n".join(script_parts)
 
 
 # ============================================================
@@ -676,7 +780,7 @@ class GeneratedScene(Scene):
 # ============================================================
 
 def solve_with_ai_fallback(
-    prompt: str
+    prompt: str,
 ) -> str:
 
     full_prompt = f"""
@@ -705,9 +809,11 @@ Generate an educational Manim scene for:
                 api_key=gemini_key
             )
 
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=full_prompt
+            response = (
+                client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=full_prompt,
+                )
             )
 
             if response.text:
@@ -740,19 +846,21 @@ Generate an educational Manim scene for:
                 api_key=groq_key
             )
 
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": full_prompt
-                    }
-                ],
-                temperature=0.2
+            response = (
+                client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": SYSTEM_PROMPT,
+                        },
+                        {
+                            "role": "user",
+                            "content": full_prompt,
+                        },
+                    ],
+                    temperature=0.2,
+                )
             )
 
             content = (
@@ -786,14 +894,20 @@ Generate an educational Manim scene for:
 
         try:
 
+            print(
+                "Trying OpenRouter..."
+            )
+
             client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=openrouter_key
+                base_url=(
+                    "https://openrouter.ai/api/v1"
+                ),
+                api_key=openrouter_key,
             )
 
             models = [
                 "openrouter/free",
-                "cohere/north-mini-code:free"
+                "cohere/north-mini-code:free",
             ]
 
             for model_id in models:
@@ -804,19 +918,21 @@ Generate an educational Manim scene for:
                         f"Trying {model_id}"
                     )
 
-                    response = client.chat.completions.create(
-                        model=model_id,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": SYSTEM_PROMPT
-                            },
-                            {
-                                "role": "user",
-                                "content": full_prompt
-                            }
-                        ],
-                        temperature=0.2
+                    response = (
+                        client.chat.completions.create(
+                            model=model_id,
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": SYSTEM_PROMPT,
+                                },
+                                {
+                                    "role": "user",
+                                    "content": full_prompt,
+                                },
+                            ],
+                            temperature=0.2,
+                        )
                     )
 
                     content = (
@@ -846,10 +962,69 @@ Generate an educational Manim scene for:
 
     raise HTTPException(
         status_code=500,
-        detail=(
-            "All AI providers failed."
-        )
+        detail="All AI providers failed.",
     )
+
+
+# ============================================================
+# VALIDATE GENERATED PYTHON
+# ============================================================
+
+def validate_python_code(
+    code: str,
+) -> None:
+
+    if not code.strip():
+
+        raise HTTPException(
+            status_code=500,
+            detail="Generated script is empty.",
+        )
+
+    if "class GeneratedScene" not in code:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Generated script does not contain "
+                "GeneratedScene."
+            ),
+        )
+
+    if "manim_voiceover" in code:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Generated script attempted to use "
+                "manim_voiceover. The current engine "
+                "does not use that package."
+            ),
+        )
+
+    if "VoiceoverScene" in code:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Generated script attempted to use "
+                "VoiceoverScene."
+            ),
+        )
+
+    try:
+
+        ast.parse(code)
+
+    except SyntaxError as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Generated Manim Python contains "
+                f"a syntax error: {e}"
+            ),
+        )
 
 
 # ============================================================
@@ -858,58 +1033,89 @@ Generate an educational Manim scene for:
 
 def render_manim_script(
     script_path: Path,
-    job_id: str
+    job_id: str,
 ) -> Path:
+
+    job_media_dir = (
+        MEDIA_DIR / job_id
+    )
+
+    job_media_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     manim_cmd = [
         "manim",
         "-ql",
         "--disable_caching",
         "--media_dir",
-        str(MEDIA_DIR),
+        str(job_media_dir),
         str(script_path),
-        "GeneratedScene"
+        "GeneratedScene",
     ]
 
     print(
-        "Starting Manim render:"
+        "========================================"
+    )
+
+    print(
+        f"Starting Manim render: {job_id}"
     )
 
     print(
         " ".join(
-            str(x)
-            for x in manim_cmd
+            str(item)
+            for item in manim_cmd
         )
+    )
+
+    print(
+        "========================================"
     )
 
     try:
 
         result = subprocess.run(
             manim_cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
-            timeout=600
+            timeout=600,
         )
-
-        print(result.stdout)
 
     except subprocess.TimeoutExpired:
 
         raise HTTPException(
             status_code=504,
             detail=(
-                "Manim rendering timed out."
-            )
+                "Manim rendering timed out "
+                "after 10 minutes."
+            ),
         )
 
-    except subprocess.CalledProcessError as err:
+    # Always print logs.
+    print(
+        "MANIM STDOUT:"
+    )
+
+    print(
+        result.stdout[-12000:]
+    )
+
+    print(
+        "MANIM STDERR:"
+    )
+
+    print(
+        result.stderr[-12000:]
+    )
+
+    if result.returncode != 0:
 
         error_msg = (
-            err.stderr
-            or err.stdout
-            or str(err)
+            result.stderr
+            or result.stdout
+            or "Unknown Manim error."
         )
 
         print(
@@ -920,7 +1126,9 @@ def render_manim_script(
             f"MANIM RENDERING FAILED FOR JOB {job_id}"
         )
 
-        print(error_msg)
+        print(
+            error_msg
+        )
 
         print(
             "========================================"
@@ -931,40 +1139,49 @@ def render_manim_script(
             detail=(
                 "Manim Rendering Error:\n"
                 + error_msg[-12000:]
-            )
+            ),
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # FIND VIDEO
-    # ========================================================
+    # --------------------------------------------------------
 
     possible_outputs = list(
-        MEDIA_DIR.rglob(
+        job_media_dir.rglob(
             "GeneratedScene.mp4"
         )
     )
 
     if not possible_outputs:
 
+        possible_outputs = list(
+            job_media_dir.rglob(
+                "*.mp4"
+            )
+        )
+
+    if not possible_outputs:
+
         raise HTTPException(
             status_code=500,
             detail=(
-                "Manim completed but "
-                "GeneratedScene.mp4 was not found."
-            )
+                "Manim completed without producing "
+                "an MP4 video."
+            ),
         )
 
     source_video = possible_outputs[-1]
 
     final_video = (
-        OUTPUT_DIR /
-        f"{job_id}.mp4"
+        OUTPUT_DIR
+        / f"{job_id}.mp4"
     )
 
     if final_video.exists():
+
         final_video.unlink()
 
-    source_video.rename(
+    source_video.replace(
         final_video
     )
 
@@ -981,9 +1198,10 @@ def health_check():
     return {
         "status": "online",
         "service": "Tezla Animator Engine",
-        "version": "3.0.1",
-        "voice_engine": "Edge TTS",
-        "voice": "en-NG-EzinneNeural"
+        "version": APP_VERSION,
+        "math_engine": "SymPy",
+        "animation_engine": "Manim",
+        "narration": "Lovable",
     }
 
 
@@ -998,7 +1216,8 @@ def engine_test():
 
     result = {
         "status": "ok",
-        "python": sys.version
+        "python": sys.version,
+        "version": APP_VERSION,
     }
 
     # --------------------------------------------------------
@@ -1008,10 +1227,13 @@ def engine_test():
     try:
 
         manim_result = subprocess.run(
-            ["manim", "--version"],
+            [
+                "manim",
+                "--version",
+            ],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
         )
 
         result["manim"] = (
@@ -1024,20 +1246,16 @@ def engine_test():
         result["manim_error"] = str(e)
 
     # --------------------------------------------------------
-    # Edge TTS
+    # SymPy
     # --------------------------------------------------------
 
     try:
 
-        import edge_tts
-
-        result["edge_tts"] = (
-            edge_tts.__version__
-        )
+        result["sympy"] = sp.__version__
 
     except Exception as e:
 
-        result["edge_tts_error"] = str(e)
+        result["sympy_error"] = str(e)
 
     # --------------------------------------------------------
     # FFprobe
@@ -1046,10 +1264,13 @@ def engine_test():
     try:
 
         ffprobe = subprocess.run(
-            ["ffprobe", "-version"],
+            [
+                "ffprobe",
+                "-version",
+            ],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
         )
 
         result["ffprobe"] = (
@@ -1066,12 +1287,48 @@ def engine_test():
 
 
 # ============================================================
+# OPTIONAL SYMPY TEST ENDPOINT
+# ============================================================
+
+@app.post("/math-test")
+def math_test(req: RenderRequest):
+
+    if not req.math_expression:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "math_expression is required."
+            ),
+        )
+
+    try:
+
+        data = calculate_with_sympy(
+            req.math_expression,
+            req.operation or "derivative",
+        )
+
+        return {
+            "status": "success",
+            "math": data,
+        }
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+
+# ============================================================
 # GENERATE VIDEO
 # ============================================================
 
 @app.post("/generate-video")
 def generate_math_video(
-    req: RenderRequest
+    req: RenderRequest,
 ):
 
     job_id = str(
@@ -1083,14 +1340,15 @@ def generate_math_video(
     )
 
     script_path = (
-        BASE_DIR /
-        script_filename
+        BASE_DIR
+        / script_filename
     )
 
     try:
 
         # ====================================================
-        # DIRECT SOLUTION STEPS
+        # PATH 1:
+        # LOVABLE ALREADY PROVIDED SOLUTION STEPS
         # ====================================================
 
         if (
@@ -1100,22 +1358,68 @@ def generate_math_video(
 
             print(
                 f"[{job_id}] "
-                "Rendering directly from solution steps."
+                "Using solution steps supplied by Lovable."
             )
 
             generated_code = (
                 build_direct_manim_script(
                     req.prompt,
                     req.solution_steps,
-                    job_id
+                    job_id,
                 )
             )
 
             used_provider = (
-                "Direct Script + Edge TTS"
+                "Lovable Steps + SymPy-safe "
+                "LaTeX + Manim"
             )
 
         # ====================================================
+        # PATH 2:
+        # SYMPY CALCULATES THE MATHEMATICS
+        # ====================================================
+
+        elif req.math_expression:
+
+            print(
+                f"[{job_id}] "
+                "Using deterministic SymPy math engine."
+            )
+
+            try:
+
+                steps = (
+                    build_sympy_solution_steps(
+                        req.math_expression,
+                        req.operation
+                        or "derivative",
+                    )
+                )
+
+            except Exception as e:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "SymPy could not solve the "
+                        f"expression: {e}"
+                    ),
+                )
+
+            generated_code = (
+                build_direct_manim_script(
+                    req.prompt,
+                    steps,
+                    job_id,
+                )
+            )
+
+            used_provider = (
+                "SymPy + Manim"
+            )
+
+        # ====================================================
+        # PATH 3:
         # AI FALLBACK
         # ====================================================
 
@@ -1137,38 +1441,22 @@ def generate_math_video(
             )
 
         # ====================================================
+        # CLEAN
+        # ====================================================
+
+        generated_code = (
+            clean_code_block(
+                generated_code
+            )
+        )
+
+        # ====================================================
         # VALIDATE
         # ====================================================
 
-        if not generated_code.strip():
-
-            raise HTTPException(
-                status_code=500,
-                detail="Generated script is empty."
-            )
-
-        if "class GeneratedScene" not in generated_code:
-
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Generated script does not contain "
-                    "GeneratedScene."
-                )
-            )
-
-        # Prevent AI from reintroducing
-        # the old broken voiceover package.
-        if "manim_voiceover" in generated_code:
-
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Generated script attempted to use "
-                    "manim_voiceover. The current engine "
-                    "uses direct Edge TTS."
-                )
-            )
+        validate_python_code(
+            generated_code
+        )
 
         # ====================================================
         # SAVE
@@ -1176,7 +1464,7 @@ def generate_math_video(
 
         script_path.write_text(
             generated_code,
-            encoding="utf-8"
+            encoding="utf-8",
         )
 
         print(
@@ -1188,9 +1476,11 @@ def generate_math_video(
         # RENDER
         # ====================================================
 
-        final_video = render_manim_script(
-            script_path,
-            job_id
+        final_video = (
+            render_manim_script(
+                script_path,
+                job_id,
+            )
         )
 
         # ====================================================
@@ -1203,7 +1493,13 @@ def generate_math_video(
             "provider_used": used_provider,
             "video_url": (
                 f"/videos/{final_video.name}"
-            )
+            ),
+            "math_engine": (
+                "SymPy"
+                if req.math_expression
+                else "Lovable/AI"
+            ),
+            "narration_engine": "Lovable",
         }
 
     except HTTPException:
@@ -1219,20 +1515,46 @@ def generate_math_video(
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=str(e),
         )
 
     finally:
 
-        # Remove temporary Python file
+        # ----------------------------------------------------
+        # Remove temporary Python script
+        # ----------------------------------------------------
+
         try:
 
             if script_path.exists():
+
                 script_path.unlink()
 
         except Exception as e:
 
             print(
-                f"Could not remove temp script: {e}"
+                "Could not remove temporary "
+                f"script: {e}"
             )
 
+
+# ============================================================
+# LOCAL DEVELOPMENT
+# ============================================================
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "8000",
+        )
+    )
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+    )
