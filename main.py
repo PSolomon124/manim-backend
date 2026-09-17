@@ -1,4 +1,3 @@
-
 import os
 import re
 import uuid
@@ -18,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "4.0.0"
+APP_VERSION = "5.0.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -30,7 +29,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 VOICE_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_VOICE = "en-NG-EzinneNeural"
+DEFAULT_VOICE = os.getenv(
+    "EDGE_TTS_VOICE",
+    "en-NG-EzinneNeural",
+)
 
 
 # ============================================================
@@ -66,6 +68,10 @@ class SolutionStep(BaseModel):
     math_latex: str
     explanation: str
 
+    # NEW V5 FIELDS
+    visual_action: Optional[str] = None
+    emphasis: Optional[List[str]] = None
+
 
 class RenderRequest(BaseModel):
     prompt: str
@@ -87,7 +93,7 @@ RULES:
 1. Import:
    from manim import *
 
-2. Define exactly one scene:
+2. Define exactly:
    class GeneratedScene(Scene):
 
 3. Do not use:
@@ -95,34 +101,33 @@ RULES:
    - VoiceoverScene
    - EdgeTTSService
 
-4. The script must be executable directly by Manim.
+4. The script must execute directly using Manim.
 
 5. Use MathTex for mathematical expressions.
 
-6. Do NOT put $ symbols inside MathTex.
+6. Never put $ symbols inside MathTex.
 
 7. Use valid LaTeX with SINGLE backslashes.
 
-8. Examples:
-   \boxed{}
-   \quad
-   \text{}
-   \frac{}{}
-   \sqrt{}
-   \left
-   \right
+8. Keep all mathematical content inside the visible frame.
 
-9. Do not put LaTeX inside spoken narration.
+9. Avoid overlapping objects.
 
-10. Keep mathematical content inside the safe screen area.
+10. Prefer:
+    next_to()
+    arrange()
+    shift()
+    move_to()
+    to_edge()
+    align_to()
 
-11. Avoid overlapping objects.
+11. Keep equations readable.
 
-12. Use next_to(), arrange(), shift(), move_to(),
-    to_edge(), align_to().
+12. Use educational animations instead of excessive decorative
+    animation.
 
 13. Define exactly:
-       class GeneratedScene(Scene):
+    class GeneratedScene(Scene):
 
 14. Return only valid Python code.
 """
@@ -133,6 +138,7 @@ RULES:
 # ============================================================
 
 def clean_code_block(code: str) -> str:
+
     code = str(code).strip()
 
     code = re.sub(
@@ -152,106 +158,34 @@ def clean_code_block(code: str) -> str:
 
 
 # ============================================================
-# SPOKEN TEXT
-# ============================================================
-
-def clean_spoken_text(text: str) -> str:
-    text = str(text).strip()
-
-    text = text.replace("$$", "")
-    text = text.replace("$", "")
-
-    replacements = {
-        r"\\boxed": "",
-        r"\\quad": " ",
-        r"\\text": "",
-        r"\\frac": " divided by ",
-        r"\\sqrt": " square root of ",
-        r"\\left": "",
-        r"\\right": "",
-        r"\\begin": "",
-        r"\\end": "",
-        r"\\times": " times ",
-        r"\\cdot": " times ",
-        r"\\pm": " plus or minus ",
-        r"\\leq": " less than or equal to ",
-        r"\\geq": " greater than or equal to ",
-        r"\\neq": " not equal to ",
-        r"\\approx": " approximately ",
-        r"\\infty": " infinity ",
-    }
-
-    for pattern, replacement in replacements.items():
-        text = re.sub(pattern, replacement, text)
-
-    text = text.replace("\\", "")
-    text = text.replace("{", "")
-    text = text.replace("}", "")
-
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
-
-
-def clean_title(text: str) -> str:
-    text = clean_spoken_text(text)
-
-    if not text:
-        return "Mathematics Solution"
-
-    return text[:100]
-
-
-# ============================================================
 # LATEX CLEANING
 # ============================================================
 
 def clean_latex(text: str) -> str:
     """
-    Normalize LaTeX coming from Lovable/JSON/AI.
-
-    Critical fix:
-        \\\\text  -> \\text
-
-    The renderer ultimately passes the result to MathTex
-    as a normal Python string created with repr().
+    Normalize LaTeX coming from Lovable / JSON / AI.
     """
 
-    text = str(text).strip()
+    text = str(text or "").strip()
 
     if not text:
         return ""
 
-    # Remove surrounding math delimiters.
     if text.startswith("$$") and text.endswith("$$"):
         text = text[2:-2].strip()
 
     elif text.startswith("$") and text.endswith("$"):
         text = text[1:-1].strip()
 
-    # Normalize CR/LF.
     text = text.replace("\r", " ")
     text = text.replace("\n", " ")
 
-    # --------------------------------------------------------
-    # CRITICAL BACKSLASH NORMALIZATION
-    # --------------------------------------------------------
-    #
-    # Incoming JSON / AI content can contain:
-    #
-    #   \\text
-    #
-    # when the actual LaTeX required by MathTex is:
-    #
-    #   \text
-    #
     # Collapse repeated backslashes.
-    #
-    text = re.sub(r"\\{2,}", r"\\", text)
-
-    # --------------------------------------------------------
-    # Repair common commands that may arrive without slash.
-    # --------------------------------------------------------
+    text = re.sub(
+        r"\\{2,}",
+        r"\\",
+        text,
+    )
 
     commands = [
         "boxed",
@@ -269,16 +203,26 @@ def clean_latex(text: str) -> str:
         "neq",
         "approx",
         "infty",
+        "sin",
+        "cos",
+        "tan",
+        "log",
+        "ln",
+        "theta",
+        "alpha",
+        "beta",
+        "gamma",
+        "pi",
     ]
 
     for command in commands:
+
         text = re.sub(
             rf"(?<!\\)\b{command}\b",
             rf"\\{command}",
             text,
         )
 
-    # Remove accidental dollar signs.
     text = text.replace("$", "")
 
     return text.strip()
@@ -289,93 +233,113 @@ def clean_latex(text: str) -> str:
 # ============================================================
 
 def python_literal(text: str) -> str:
-    """
-    Safely convert text to a Python string literal.
-
-    repr() is deliberately used instead of manually escaping
-    LaTeX backslashes.
-    """
-
     return repr(str(text))
 
 
 # ============================================================
-# EDGE TTS
+# SPOKEN TEXT CLEANING
 # ============================================================
 
-def generate_edge_tts_sync(
-    text: str,
-    output_file: str,
-    voice: str = DEFAULT_VOICE,
-):
-    import edge_tts
+def clean_spoken_text(text: str) -> str:
+    """
+    Explanation is expected to already be natural spoken English.
 
-    async def generate():
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=voice,
+    This function only removes formatting artifacts.
+    It does NOT try to convert full LaTeX mathematics into speech.
+    """
+
+    text = str(text or "").strip()
+
+    if not text:
+        return ""
+
+    text = text.replace("$$", "")
+    text = text.replace("$", "")
+
+    text = text.replace("\r", " ")
+    text = text.replace("\n", " ")
+
+    # Remove markdown emphasis.
+    text = text.replace("**", "")
+    text = text.replace("__", "")
+    text = text.replace("`", "")
+
+    # Small set of safe conversions.
+    replacements = {
+        r"\\times": " times ",
+        r"\\cdot": " times ",
+        r"\\pm": " plus or minus ",
+        r"\\leq": " less than or equal to ",
+        r"\\geq": " greater than or equal to ",
+        r"\\neq": " not equal to ",
+        r"\\approx": " approximately ",
+        r"\\infty": " infinity ",
+        r"\\pi": " pi ",
+        r"\\theta": " theta ",
+        r"\\alpha": " alpha ",
+        r"\\beta": " beta ",
+        r"\\gamma": " gamma ",
+    }
+
+    for pattern, replacement in replacements.items():
+        text = re.sub(
+            pattern,
+            replacement,
+            text,
         )
 
-        await communicate.save(output_file)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
-    asyncio.run(generate())
+    return text.strip()
 
 
-# ============================================================
-# AUDIO DURATION
-# ============================================================
+def clean_title(text: str) -> str:
 
-def get_audio_duration(audio_file: str) -> float:
+    text = str(text or "").strip()
 
-    if not Path(audio_file).exists():
-        return 3.0
+    text = text.replace("\n", " ")
 
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                audio_file,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=20,
-        )
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
-        duration = float(
-            result.stdout.strip()
-        )
+    if not text:
+        return "Mathematics Solution"
 
-        return max(duration, 1.0)
+    # Avoid extremely long question as title.
+    if len(text) > 72:
+        text = text[:69].rstrip() + "..."
 
-    except Exception as exc:
-
-        print(
-            f"Could not determine audio duration: {exc}"
-        )
-
-        return 3.0
+    return text
 
 
 # ============================================================
-# TEXT WRAPPING
+# DISPLAY TEXT
 # ============================================================
 
-def wrap_text_for_manim(
-    text: str,
-    max_chars: int = 65,
+def make_display_explanation(
+    explanation: str,
+    max_chars: int = 48,
+    max_lines: int = 4,
 ) -> str:
+    """
+    Produce short screen text.
+
+    Full explanation remains in narration.
+    """
+
+    text = clean_spoken_text(explanation)
+
+    if not text:
+        return ""
 
     words = text.split()
-
-    if not words:
-        return ""
 
     lines = []
     current = ""
@@ -395,249 +359,118 @@ def wrap_text_for_manim(
 
             current = word
 
+            if len(lines) >= max_lines:
+                break
+
         else:
             current = candidate
 
-    if current:
+    if (
+        current
+        and len(lines) < max_lines
+    ):
         lines.append(current)
 
-    return "\n".join(lines[:4])
+    result = "\n".join(lines)
+
+    if len(words) > len(result.split()):
+        result = result.rstrip(".") + "..."
+
+    return result
 
 
 # ============================================================
-# DIAGRAM CODE
+# EDGE TTS
 # ============================================================
 
-def add_diagram_to_script(
-    script_lines: list,
-    diagram_spec: Optional[dict],
+def generate_edge_tts_sync(
+    text: str,
+    output_file: str,
+    voice: str = DEFAULT_VOICE,
 ):
     """
-    Creates a controlled diagram occupying the LEFT side
-    of the screen.
-
-    The mathematical solution occupies the RIGHT side.
+    Generate one narration MP3.
     """
 
-    if not diagram_spec:
-        return
+    import edge_tts
 
-    kind = diagram_spec.get("kind")
+    async def generate():
 
-    # ========================================================
-    # PARALLELOGRAM
-    # ========================================================
-
-    if kind == "parallelogram_to_triangles":
-
-        script_lines.extend([
-            "",
-            "        # ----------------------------------------",
-            "        # LEFT-SIDE PARALLELOGRAM DIAGRAM",
-            "        # ----------------------------------------",
-            "",
-            "        p1 = LEFT * 5 + DOWN * 1",
-            "        p2 = LEFT * 1.5 + DOWN * 1",
-            "        p3 = RIGHT * 0.3 + UP * 1.3",
-            "        p4 = LEFT * 3.2 + UP * 1.3",
-            "",
-            "        parallelogram = Polygon(",
-            "            p1, p2, p3, p4,",
-            "            color=TEAL,",
-            "            fill_opacity=0.15,",
-            "            stroke_width=4,",
-            "        )",
-            "",
-            "        base_line = Line(",
-            "            p1, p2,",
-            "            color=WHITE,",
-            "            stroke_width=4,",
-            "        )",
-            "",
-            "        diagonal = Line(",
-            "            p1, p3,",
-            "            color=YELLOW,",
-            "            stroke_width=4,",
-            "        )",
-            "",
-            "        height_line = DashedLine(",
-            "            p4,",
-            "            [p4[0], p1[1], 0],",
-            "            color=RED,",
-            "            stroke_width=3,",
-            "            dash_length=0.08,",
-            "        )",
-            "",
-            "        base_label = MathTex(",
-            "            r\"b\",",
-            "            font_size=38,",
-            "        )",
-            "        base_label.next_to(",
-            "            base_line,",
-            "            DOWN * 0.55,",
-            "        )",
-            "",
-            "        height_label = MathTex(",
-            "            r\"h\",",
-            "            font_size=38,",
-            "        )",
-            "        height_label.next_to(",
-            "            height_line,",
-            "            RIGHT * 0.25,",
-            "        )",
-            "",
-            "        diagram_group = VGroup(",
-            "            parallelogram,",
-            "            base_line,",
-            "            diagonal,",
-            "            height_line,",
-            "            base_label,",
-            "            height_label,",
-            "        )",
-            "",
-            "        diagram_group.shift(LEFT * 0.4)",
-            "",
-            "        self.play(",
-            "            Create(parallelogram),",
-            "            Create(base_line),",
-            "            Create(diagonal),",
-            "            Create(height_line),",
-            "            Write(base_label),",
-            "            Write(height_label),",
-            "            run_time=1.5,",
-            "        )",
-            "",
-        ])
-
-    # ========================================================
-    # TRIANGLE
-    # ========================================================
-
-    elif kind == "triangle":
-
-        script_lines.extend([
-            "",
-            "        # ----------------------------------------",
-            "        # LEFT-SIDE TRIANGLE",
-            "        # ----------------------------------------",
-            "",
-            "        triangle = Polygon(",
-            "            LEFT * 4.5 + DOWN * 1.2,",
-            "            LEFT * 0.8 + DOWN * 1.2,",
-            "            LEFT * 2.6 + UP * 2.0,",
-            "            color=TEAL,",
-            "            fill_opacity=0.18,",
-            "            stroke_width=4,",
-            "        )",
-            "",
-            "        self.play(",
-            "            Create(triangle),",
-            "            run_time=1.2,",
-            "        )",
-            "",
-        ])
-
-    # ========================================================
-    # CIRCLE
-    # ========================================================
-
-    elif kind == "circle":
-
-        script_lines.extend([
-            "",
-            "        # ----------------------------------------",
-            "        # LEFT-SIDE CIRCLE",
-            "        # ----------------------------------------",
-            "",
-            "        circle = Circle(",
-            "            radius=2.0,",
-            "            color=TEAL,",
-            "            fill_opacity=0.18,",
-            "        )",
-            "",
-            "        circle.shift(LEFT * 2.5)",
-            "",
-            "        self.play(",
-            "            Create(circle),",
-            "            run_time=1.2,",
-            "        )",
-            "",
-        ])
-
-    # ========================================================
-    # NUMBER LINE
-    # ========================================================
-
-    elif kind == "number_line":
-
-        script_lines.extend([
-            "",
-            "        # ----------------------------------------",
-            "        # NUMBER LINE",
-            "        # ----------------------------------------",
-            "",
-            "        number_line = NumberLine(",
-            "            x_range=[-5, 5, 1],",
-            "            length=7,",
-            "            include_numbers=True,",
-            "        )",
-            "",
-            "        number_line.shift(LEFT * 2.2)",
-            "",
-            "        self.play(",
-            "            Create(number_line),",
-            "            run_time=1.2,",
-            "        )",
-            "",
-        ])
-
-    # ========================================================
-    # COORDINATE PLANE
-    # ========================================================
-
-    elif kind == "coordinate_plane":
-
-        script_lines.extend([
-            "",
-            "        # ----------------------------------------",
-            "        # COORDINATE PLANE",
-            "        # ----------------------------------------",
-            "",
-            "        plane = NumberPlane(",
-            "            x_range=[-4, 4, 1],",
-            "            y_range=[-3, 3, 1],",
-            "            background_line_style={",
-            '                "stroke_opacity": 0.25',
-            "            },",
-            "        )",
-            "",
-            "        plane.scale(0.75)",
-            "        plane.shift(LEFT * 2.3)",
-            "",
-            "        self.play(",
-            "            Create(plane),",
-            "            run_time=1.2,",
-            "        )",
-            "",
-        ])
-
-    else:
-
-        print(
-            f"Unknown diagram type: {kind}"
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=voice,
         )
 
+        await communicate.save(
+            output_file
+        )
+
+    asyncio.run(generate())
+
 
 # ============================================================
-# BUILD DIRECT MANIM SCRIPT
+# AUDIO DURATION
 # ============================================================
 
-def build_direct_manim_script(
-    prompt: str,
+def get_audio_duration(
+    audio_file: str,
+) -> float:
+
+    path = Path(audio_file)
+
+    if not path.exists():
+        return 0.0
+
+    try:
+
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
+        )
+
+        duration = float(
+            result.stdout.strip()
+        )
+
+        return max(
+            duration,
+            0.1,
+        )
+
+    except Exception as exc:
+
+        print(
+            f"Could not determine audio duration: {exc}"
+        )
+
+        return 0.0
+
+
+# ============================================================
+# PREPARE NARRATION
+# ============================================================
+
+def prepare_step_audio(
     steps: List[SolutionStep],
     job_id: str,
-    diagram_spec: Optional[dict] = None,
-) -> str:
+):
+    """
+    Generate ALL voice files before constructing Manim script.
+
+    Narration therefore becomes the master timeline.
+    """
 
     voice_dir = VOICE_DIR / job_id
 
@@ -646,134 +479,26 @@ def build_direct_manim_script(
         exist_ok=True,
     )
 
-    title = clean_title(prompt)
+    audio_data = []
 
-    script_lines = []
-
-    # ========================================================
-    # IMPORT
-    # ========================================================
-
-    script_lines.append(
-        "from manim import *"
-    )
-
-    script_lines.append("")
-
-    # ========================================================
-    # SCENE
-    # ========================================================
-
-    script_lines.append(
-        "class GeneratedScene(Scene):"
-    )
-
-    script_lines.append(
-        "    def construct(self):"
-    )
-
-    script_lines.append(
-        '        self.camera.background_color = "#0b1220"'
-    )
-
-    script_lines.append("")
-
-    # ========================================================
-    # TITLE
-    # ========================================================
-
-    script_lines.append(
-        f"        title = Text("
-        f"{python_literal(title)}, "
-        f"font_size=34"
-        f")"
-    )
-
-    script_lines.append(
-        "        title.to_edge(UP, buff=0.35)"
-    )
-
-    script_lines.append(
-        "        self.play(Write(title), run_time=0.8)"
-    )
-
-    script_lines.append(
-        "        self.wait(0.4)"
-    )
-
-    # ========================================================
-    # CONTENT DIVIDER
-    # ========================================================
-
-    script_lines.append(
-        "        divider = Line("
-        "LEFT * 6.5, "
-        "RIGHT * 6.5, "
-        "stroke_opacity=0.35"
-        ")"
-    )
-
-    script_lines.append(
-        "        divider.next_to(title, DOWN, buff=0.25)"
-    )
-
-    script_lines.append(
-        "        self.play(Create(divider), run_time=0.3)"
-    )
-
-    script_lines.append("")
-
-    # ========================================================
-    # DIAGRAM
-    # ========================================================
-
-    add_diagram_to_script(
-        script_lines,
-        diagram_spec,
-    )
-
-    # ========================================================
-    # SOLUTION AREA
-    # ========================================================
-
-    script_lines.append(
-        "        previous_equation = None"
-    )
-
-    script_lines.append("")
+    print("=" * 70)
+    print("PREPARING NARRATION")
+    print("=" * 70)
 
     for index, step in enumerate(
         steps,
         start=1,
     ):
 
-        # ====================================================
-        # EXPLANATION
-        # ====================================================
-
-        explanation = clean_spoken_text(
+        narration = clean_spoken_text(
             step.explanation
         )
 
-        if not explanation:
-            explanation = f"Now we move to step {index}."
+        if not narration:
 
-        explanation = wrap_text_for_manim(
-            explanation,
-            max_chars=58,
-        )
-
-        # ====================================================
-        # LATEX
-        # ====================================================
-
-        cleaned_latex = clean_latex(
-            step.math_latex
-        )
-
-        # ====================================================
-        # AUDIO
-        # ====================================================
+            narration = (
+                f"Now we continue with step {index}."
+            )
 
         audio_file = (
             voice_dir /
@@ -781,207 +506,1033 @@ def build_direct_manim_script(
         )
 
         audio_exists = False
+        duration = 0.0
 
         try:
 
+            print(
+                f"TTS STEP {index}: {narration}"
+            )
+
             generate_edge_tts_sync(
-                explanation,
+                narration,
                 str(audio_file),
                 DEFAULT_VOICE,
             )
 
-            audio_exists = audio_file.exists()
+            audio_exists = (
+                audio_file.exists()
+                and
+                audio_file.stat().st_size > 0
+            )
+
+            if audio_exists:
+
+                duration = get_audio_duration(
+                    str(audio_file)
+                )
+
+                print(
+                    f"TTS STEP {index} OK: "
+                    f"{duration:.2f}s "
+                    f"({audio_file.stat().st_size} bytes)"
+                )
+
+            else:
+
+                print(
+                    f"TTS STEP {index}: "
+                    "file was not created."
+                )
 
         except Exception as exc:
 
             print(
-                f"Edge TTS failed for step "
+                f"EDGE TTS FAILED FOR STEP "
                 f"{index}: {exc}"
             )
 
-        duration = (
-            get_audio_duration(
-                str(audio_file)
+        audio_data.append(
+            {
+                "index": index,
+                "narration": narration,
+                "path": audio_file,
+                "exists": audio_exists,
+                "duration": duration,
+            }
+        )
+
+    return audio_data
+
+
+# ============================================================
+# MANIM DIAGRAM SETUP
+# ============================================================
+
+def add_diagram_setup(
+    lines: list,
+    diagram_spec: Optional[dict],
+):
+    """
+    Create diagram OBJECTS but do not immediately reveal everything.
+
+    Visual actions during narration reveal/highlight them.
+    """
+
+    if not diagram_spec:
+        return
+
+    kind = str(
+        diagram_spec.get(
+            "kind",
+            "",
+        )
+    ).strip()
+
+    if kind == "parallelogram_to_triangles":
+
+        lines.extend([
+            "",
+            "        # ========================================",
+            "        # PARALLELOGRAM TEACHING DIAGRAM",
+            "        # ========================================",
+            "",
+            "        p1 = LEFT * 5.4 + DOWN * 1.25",
+            "        p2 = LEFT * 1.8 + DOWN * 1.25",
+            "        p3 = LEFT * 0.25 + UP * 1.45",
+            "        p4 = LEFT * 3.85 + UP * 1.45",
+            "",
+            "        parallelogram = Polygon(",
+            "            p1, p2, p3, p4,",
+            "            color=TEAL,",
+            "            fill_opacity=0.10,",
+            "            stroke_width=4,",
+            "        )",
+            "",
+            "        base_line = Line(",
+            "            p1, p2,",
+            "            color=YELLOW,",
+            "            stroke_width=6,",
+            "        )",
+            "",
+            "        height_foot = np.array([p4[0], p1[1], 0])",
+            "",
+            "        height_line = DashedLine(",
+            "            p4,",
+            "            height_foot,",
+            "            color=RED,",
+            "            stroke_width=4,",
+            "            dash_length=0.10,",
+            "        )",
+            "",
+            "        diagonal = Line(",
+            "            p1, p3,",
+            "            color=YELLOW,",
+            "            stroke_width=5,",
+            "        )",
+            "",
+            "        triangle_one = Polygon(",
+            "            p1, p2, p3,",
+            "            color=BLUE,",
+            "            fill_opacity=0.25,",
+            "            stroke_opacity=0,",
+            "        )",
+            "",
+            "        triangle_two = Polygon(",
+            "            p1, p3, p4,",
+            "            color=GREEN,",
+            "            fill_opacity=0.25,",
+            "            stroke_opacity=0,",
+            "        )",
+            "",
+            "        base_label = MathTex(",
+            "            r'b',",
+            "            font_size=38,",
+            "        )",
+            "",
+            "        base_label.next_to(",
+            "            base_line,",
+            "            DOWN,",
+            "            buff=0.25,",
+            "        )",
+            "",
+            "        height_label = MathTex(",
+            "            r'h',",
+            "            font_size=38,",
+            "        )",
+            "",
+            "        height_label.next_to(",
+            "            height_line,",
+            "            LEFT,",
+            "            buff=0.18,",
+            "        )",
+            "",
+            "        right_angle = RightAngle(",
+            "            Line(height_foot, p4),",
+            "            Line(height_foot, p2),",
+            "            length=0.18,",
+            "            quadrant=(1, 1),",
+            "        )",
+            "",
+            "        diagram_created = False",
+            "        base_height_visible = False",
+            "        diagonal_visible = False",
+            "        triangles_visible = False",
+            "",
+        ])
+
+    elif kind == "triangle":
+
+        lines.extend([
+            "",
+            "        # ========================================",
+            "        # TRIANGLE TEACHING DIAGRAM",
+            "        # ========================================",
+            "",
+            "        ta = LEFT * 5.0 + DOWN * 1.4",
+            "        tb = LEFT * 1.2 + DOWN * 1.4",
+            "        tc = LEFT * 3.0 + UP * 1.8",
+            "",
+            "        triangle = Polygon(",
+            "            ta, tb, tc,",
+            "            color=TEAL,",
+            "            fill_opacity=0.14,",
+            "            stroke_width=4,",
+            "        )",
+            "",
+            "        triangle_base = Line(",
+            "            ta, tb,",
+            "            color=YELLOW,",
+            "            stroke_width=6,",
+            "        )",
+            "",
+            "        triangle_height_foot = np.array([tc[0], ta[1], 0])",
+            "",
+            "        triangle_height = DashedLine(",
+            "            tc,",
+            "            triangle_height_foot,",
+            "            color=RED,",
+            "            stroke_width=4,",
+            "        )",
+            "",
+            "        triangle_base_label = MathTex(",
+            "            r'b',",
+            "            font_size=38,",
+            "        ).next_to(triangle_base, DOWN, buff=0.25)",
+            "",
+            "        triangle_height_label = MathTex(",
+            "            r'h',",
+            "            font_size=38,",
+            "        ).next_to(triangle_height, RIGHT, buff=0.20)",
+            "",
+            "        triangle_created = False",
+            "        triangle_dimensions_visible = False",
+            "",
+        ])
+
+    elif kind == "circle":
+
+        lines.extend([
+            "",
+            "        # ========================================",
+            "        # CIRCLE TEACHING DIAGRAM",
+            "        # ========================================",
+            "",
+            "        circle = Circle(",
+            "            radius=1.8,",
+            "            color=TEAL,",
+            "            fill_opacity=0.12,",
+            "            stroke_width=4,",
+            "        )",
+            "",
+            "        circle.move_to(LEFT * 3.2 + DOWN * 0.1)",
+            "",
+            "        center_dot = Dot(circle.get_center())",
+            "",
+            "        radius_line = Line(",
+            "            circle.get_center(),",
+            "            circle.get_right(),",
+            "            color=YELLOW,",
+            "            stroke_width=5,",
+            "        )",
+            "",
+            "        radius_label = MathTex(",
+            "            r'r',",
+            "            font_size=38,",
+            "        ).next_to(radius_line, UP, buff=0.15)",
+            "",
+            "        circle_created = False",
+            "        radius_visible = False",
+            "",
+        ])
+
+    elif kind == "number_line":
+
+        lines.extend([
+            "",
+            "        number_line = NumberLine(",
+            "            x_range=[-5, 5, 1],",
+            "            length=6.2,",
+            "            include_numbers=True,",
+            "            font_size=26,",
+            "        )",
+            "",
+            "        number_line.move_to(LEFT * 3.0 + DOWN * 0.2)",
+            "",
+            "        number_line_created = False",
+            "",
+        ])
+
+    elif kind == "coordinate_plane":
+
+        lines.extend([
+            "",
+            "        plane = NumberPlane(",
+            "            x_range=[-4, 4, 1],",
+            "            y_range=[-3, 3, 1],",
+            "            x_length=6.0,",
+            "            y_length=4.5,",
+            "            background_line_style={",
+            "                'stroke_opacity': 0.25,",
+            "            },",
+            "        )",
+            "",
+            "        plane.move_to(LEFT * 3.0 + DOWN * 0.25)",
+            "",
+            "        plane_created = False",
+            "",
+        ])
+
+
+# ============================================================
+# VISUAL ACTIONS
+# ============================================================
+
+def add_visual_action(
+    lines: list,
+    visual_action: Optional[str],
+    diagram_spec: Optional[dict],
+    animation_time: float,
+):
+    """
+    Add deterministic educational diagram actions.
+
+    Lovable may provide visual_action.
+
+    If it does not, safe defaults are used.
+    """
+
+    if not diagram_spec:
+        return
+
+    kind = str(
+        diagram_spec.get(
+            "kind",
+            "",
+        )
+    ).strip()
+
+    action = str(
+        visual_action or ""
+    ).strip().lower()
+
+    rt = max(
+        min(animation_time, 1.6),
+        0.35,
+    )
+
+    if kind == "parallelogram_to_triangles":
+
+        if action in {
+            "",
+            "show_parallelogram",
+            "introduce_shape",
+        }:
+
+            lines.extend([
+                "        if not diagram_created:",
+                "            self.play(",
+                "                Create(parallelogram),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            diagram_created = True",
+            ])
+
+        elif action in {
+            "show_base_height",
+            "highlight_base_height",
+            "show_dimensions",
+        }:
+
+            lines.extend([
+                "        if not diagram_created:",
+                "            self.play(",
+                "                Create(parallelogram),",
+                f"                run_time={max(rt * 0.55, 0.35):.2f},",
+                "            )",
+                "            diagram_created = True",
+                "",
+                "        if not base_height_visible:",
+                "            self.play(",
+                "                Create(base_line),",
+                "                Create(height_line),",
+                "                Write(base_label),",
+                "                Write(height_label),",
+                "                FadeIn(right_angle),",
+                f"                run_time={max(rt * 0.75, 0.45):.2f},",
+                "            )",
+                "            base_height_visible = True",
+                "        else:",
+                "            self.play(",
+                "                Indicate(base_line),",
+                "                Indicate(height_line),",
+                f"                run_time={rt:.2f},",
+                "            )",
+            ])
+
+        elif action in {
+            "draw_diagonal",
+            "divide_parallelogram",
+            "split_into_triangles",
+        }:
+
+            lines.extend([
+                "        if not diagram_created:",
+                "            self.play(",
+                "                Create(parallelogram),",
+                f"                run_time={max(rt * 0.5, 0.35):.2f},",
+                "            )",
+                "            diagram_created = True",
+                "",
+                "        if not diagonal_visible:",
+                "            self.play(",
+                "                Create(diagonal),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            diagonal_visible = True",
+                "",
+                "        if not triangles_visible:",
+                "            self.play(",
+                "                FadeIn(triangle_one),",
+                "                FadeIn(triangle_two),",
+                f"                run_time={max(rt * 0.65, 0.40):.2f},",
+                "            )",
+                "            triangles_visible = True",
+            ])
+
+        elif action in {
+            "highlight_triangle",
+            "show_half",
+            "highlight_half",
+        }:
+
+            lines.extend([
+                "        if not diagram_created:",
+                "            self.play(",
+                "                Create(parallelogram),",
+                f"                run_time={max(rt * 0.4, 0.35):.2f},",
+                "            )",
+                "            diagram_created = True",
+                "",
+                "        if not diagonal_visible:",
+                "            self.play(",
+                "                Create(diagonal),",
+                f"                run_time={max(rt * 0.5, 0.35):.2f},",
+                "            )",
+                "            diagonal_visible = True",
+                "",
+                "        if not triangles_visible:",
+                "            self.play(",
+                "                FadeIn(triangle_one),",
+                "                FadeIn(triangle_two),",
+                f"                run_time={max(rt * 0.5, 0.35):.2f},",
+                "            )",
+                "            triangles_visible = True",
+                "",
+                "        self.play(",
+                "            Indicate(triangle_one),",
+                f"            run_time={rt:.2f},",
+                "        )",
+            ])
+
+        elif action in {
+            "highlight_base",
+            "show_base",
+        }:
+
+            lines.extend([
+                "        if not diagram_created:",
+                "            self.play(",
+                "                Create(parallelogram),",
+                f"                run_time={max(rt * 0.5, 0.35):.2f},",
+                "            )",
+                "            diagram_created = True",
+                "",
+                "        if not base_height_visible:",
+                "            self.play(",
+                "                Create(base_line),",
+                "                Write(base_label),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            base_height_visible = True",
+                "        else:",
+                "            self.play(",
+                "                Indicate(base_line),",
+                f"                run_time={rt:.2f},",
+                "            )",
+            ])
+
+        elif action in {
+            "highlight_height",
+            "show_height",
+        }:
+
+            lines.extend([
+                "        if not diagram_created:",
+                "            self.play(",
+                "                Create(parallelogram),",
+                f"                run_time={max(rt * 0.5, 0.35):.2f},",
+                "            )",
+                "            diagram_created = True",
+                "",
+                "        self.play(",
+                "            Create(height_line),",
+                "            Write(height_label),",
+                f"            run_time={rt:.2f},",
+                "        )",
+            ])
+
+        else:
+
+            lines.extend([
+                "        if not diagram_created:",
+                "            self.play(",
+                "                Create(parallelogram),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            diagram_created = True",
+            ])
+
+    elif kind == "triangle":
+
+        if action in {
+            "show_base_height",
+            "show_dimensions",
+            "highlight_base_height",
+        }:
+
+            lines.extend([
+                "        if not triangle_created:",
+                "            self.play(",
+                "                Create(triangle),",
+                f"                run_time={max(rt * 0.6, 0.35):.2f},",
+                "            )",
+                "            triangle_created = True",
+                "",
+                "        if not triangle_dimensions_visible:",
+                "            self.play(",
+                "                Create(triangle_base),",
+                "                Create(triangle_height),",
+                "                Write(triangle_base_label),",
+                "                Write(triangle_height_label),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            triangle_dimensions_visible = True",
+            ])
+
+        else:
+
+            lines.extend([
+                "        if not triangle_created:",
+                "            self.play(",
+                "                Create(triangle),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            triangle_created = True",
+            ])
+
+    elif kind == "circle":
+
+        if action in {
+            "show_radius",
+            "highlight_radius",
+        }:
+
+            lines.extend([
+                "        if not circle_created:",
+                "            self.play(",
+                "                Create(circle),",
+                f"                run_time={max(rt * 0.6, 0.35):.2f},",
+                "            )",
+                "            circle_created = True",
+                "",
+                "        if not radius_visible:",
+                "            self.play(",
+                "                FadeIn(center_dot),",
+                "                Create(radius_line),",
+                "                Write(radius_label),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            radius_visible = True",
+            ])
+
+        else:
+
+            lines.extend([
+                "        if not circle_created:",
+                "            self.play(",
+                "                Create(circle),",
+                f"                run_time={rt:.2f},",
+                "            )",
+                "            circle_created = True",
+            ])
+
+    elif kind == "number_line":
+
+        lines.extend([
+            "        if not number_line_created:",
+            "            self.play(",
+            "                Create(number_line),",
+            f"                run_time={rt:.2f},",
+            "            )",
+            "            number_line_created = True",
+        ])
+
+    elif kind == "coordinate_plane":
+
+        lines.extend([
+            "        if not plane_created:",
+            "            self.play(",
+            "                Create(plane),",
+            f"                run_time={rt:.2f},",
+            "            )",
+            "            plane_created = True",
+        ])
+
+
+# ============================================================
+# DIRECT TEACHING SCRIPT BUILDER
+# ============================================================
+
+def build_direct_manim_script(
+    prompt: str,
+    steps: List[SolutionStep],
+    job_id: str,
+    diagram_spec: Optional[dict] = None,
+) -> str:
+    """
+    V5 Teaching Timeline Engine.
+
+    Important principle:
+
+    AUDIO STARTS BEFORE VISUAL STEP ANIMATIONS.
+
+    Therefore the visual animation happens WHILE the teacher
+    is speaking instead of before the narration.
+    """
+
+    audio_data = prepare_step_audio(
+        steps,
+        job_id,
+    )
+
+    title = clean_title(
+        prompt
+    )
+
+    lines = []
+
+    lines.append(
+        "from manim import *"
+    )
+
+    lines.append(
+        "import numpy as np"
+    )
+
+    lines.append("")
+
+    lines.append(
+        "class GeneratedScene(Scene):"
+    )
+
+    lines.append(
+        "    def construct(self):"
+    )
+
+    lines.append(
+        '        self.camera.background_color = "#0b1220"'
+    )
+
+    lines.append("")
+
+    # ========================================================
+    # HEADER
+    # ========================================================
+
+    lines.extend([
+        "        title = Text(",
+        f"            {python_literal(title)},",
+        "            font_size=30,",
+        "            weight=BOLD,",
+        "        )",
+        "",
+        "        title.scale_to_fit_width(12.0)",
+        "        title.to_edge(UP, buff=0.25)",
+        "",
+        "        divider = Line(",
+        "            LEFT * 6.4,",
+        "            RIGHT * 6.4,",
+        "            stroke_opacity=0.25,",
+        "        )",
+        "",
+        "        divider.next_to(",
+        "            title,",
+        "            DOWN,",
+        "            buff=0.18,",
+        "        )",
+        "",
+        "        self.play(",
+        "            FadeIn(title),",
+        "            Create(divider),",
+        "            run_time=0.65,",
+        "        )",
+        "",
+    ])
+
+    # ========================================================
+    # DIAGRAM OBJECTS
+    # ========================================================
+
+    add_diagram_setup(
+        lines,
+        diagram_spec,
+    )
+
+    # ========================================================
+    # RIGHT-SIDE TEACHING PANEL
+    # ========================================================
+
+    lines.extend([
+        "",
+        "        equation_anchor = RIGHT * 3.15 + UP * 1.15",
+        "        explanation_anchor = RIGHT * 3.15 + DOWN * 1.20",
+        "",
+        "        previous_equation = None",
+        "        previous_explanation = None",
+        "        previous_step_label = None",
+        "",
+    ])
+
+    # ========================================================
+    # STEPS
+    # ========================================================
+
+    for i, step in enumerate(
+        steps,
+        start=1,
+    ):
+
+        audio = audio_data[i - 1]
+
+        narration_duration = float(
+            audio["duration"]
+        )
+
+        audio_exists = bool(
+            audio["exists"]
+        )
+
+        latex = clean_latex(
+            step.math_latex
+        )
+
+        display_explanation = (
+            make_display_explanation(
+                step.explanation
             )
-            if audio_exists
-            else 3.0
         )
 
-        # ====================================================
-        # STEP LABEL
-        # ====================================================
-
-        script_lines.append(
-            f"        step_label = Text("
-            f"{python_literal(f'Step {index}')}, "
-            f"font_size=27"
-            f")"
+        visual_action = (
+            step.visual_action
+            or ""
         )
 
-        script_lines.append(
-            "        step_label.to_edge("
-            "UP, "
-            "buff=0.9"
-            ")"
-        )
+        # Reserve most of narration for actual teaching.
+        #
+        # Do not let entrance animation consume entire speech.
+        if narration_duration > 0:
+
+            visual_budget = min(
+                1.6,
+                max(
+                    0.7,
+                    narration_duration * 0.30,
+                ),
+            )
+
+        else:
+
+            visual_budget = 1.0
+
+        lines.extend([
+            "",
+            "        # ========================================",
+            f"        # STEP {i}",
+            "        # ========================================",
+            "",
+            f"        step_label = Text(",
+            f"            {python_literal(f'Step {i}')},",
+            "            font_size=24,",
+            "            weight=BOLD,",
+            "        )",
+            "",
+            "        step_label.move_to(",
+            "            RIGHT * 3.15 + UP * 2.55",
+            "        )",
+            "",
+        ])
 
         # ====================================================
         # EQUATION
         # ====================================================
 
-        if cleaned_latex:
+        if latex:
 
-            # CRITICAL:
-            # repr() preserves a SINGLE LaTeX backslash.
-            latex_literal = python_literal(
-                cleaned_latex
-            )
-
-            script_lines.append(
-                f"        tex = MathTex("
-                f"{latex_literal}, "
-                f"font_size=52"
-                f")"
-            )
-
-            script_lines.append(
-                "        tex.scale_to_fit_width(5.6)"
-            )
-
-            script_lines.append(
-                "        tex.move_to("
-                "RIGHT * 2.5 + UP * 0.8"
-                ")"
-            )
+            lines.extend([
+                "        tex = MathTex(",
+                f"            {python_literal(latex)},",
+                "            font_size=48,",
+                "        )",
+                "",
+                "        tex.scale_to_fit_width(5.4)",
+                "        tex.move_to(equation_anchor)",
+                "",
+            ])
 
         else:
 
-            script_lines.append(
-                "        tex = Text("
-                f"{python_literal('No equation provided')}, "
-                f"font_size=30"
-                f")"
-            )
-
-            script_lines.append(
-                "        tex.move_to("
-                "RIGHT * 2.5 + UP * 0.8"
-                ")"
-            )
+            lines.extend([
+                "        tex = Text(",
+                "            'Continue',",
+                "            font_size=32,",
+                "        )",
+                "",
+                "        tex.move_to(equation_anchor)",
+                "",
+            ])
 
         # ====================================================
-        # EXPLANATION OBJECT
+        # DISPLAY EXPLANATION
         # ====================================================
 
-        script_lines.append(
-            f"        explanation = Text("
-            f"{python_literal(explanation)}, "
-            f"font_size=21, "
-            f"line_spacing=0.9"
-            f")"
-        )
+        if display_explanation:
 
-        script_lines.append(
-            "        explanation.set_width(5.6)"
-        )
-
-        script_lines.append(
-            "        explanation.move_to("
-            "RIGHT * 2.5 + DOWN * 1.45"
-            ")"
-        )
-
-        # ====================================================
-        # STEP LABEL
-        # ====================================================
-
-        script_lines.append(
-            "        self.play("
-            "FadeIn(step_label), "
-            "run_time=0.35"
-            ")"
-        )
-
-        # ====================================================
-        # EQUATION TRANSITION
-        # ====================================================
-
-        if index == 1:
-
-            script_lines.append(
-                "        self.play("
-                "Write(tex), "
-                "run_time=1.0"
-                ")"
-            )
+            lines.extend([
+                "        explanation = Text(",
+                f"            {python_literal(display_explanation)},",
+                "            font_size=19,",
+                "            line_spacing=0.85,",
+                "        )",
+                "",
+                "        explanation.scale_to_fit_width(5.4)",
+                "        explanation.move_to(explanation_anchor)",
+                "",
+            ])
 
         else:
 
-            # Avoid TransformMatchingTex because equations
-            # can have completely different structures.
-            script_lines.append(
-                "        self.play("
-                "FadeOut(previous_equation), "
-                "Write(tex), "
-                "run_time=0.8"
-                ")"
-            )
+            lines.extend([
+                "        explanation = Text(",
+                "            '',",
+                "            font_size=19,",
+                "        )",
+                "",
+                "        explanation.move_to(explanation_anchor)",
+                "",
+            ])
 
         # ====================================================
-        # EXPLANATION
-        # ====================================================
-
-        script_lines.append(
-            "        self.play("
-            "FadeIn(explanation), "
-            "run_time=0.5"
-            ")"
-        )
-
-        # ====================================================
-        # AUDIO
+        # START AUDIO FIRST
         # ====================================================
 
         if audio_exists:
 
             audio_path = (
-                str(audio_file)
+                str(audio["path"])
                 .replace("\\", "/")
             )
 
-            script_lines.append(
-                f"        self.add_sound("
-                f"{python_literal(audio_path)}"
-                f")"
+            lines.extend([
+                "        # Start narration BEFORE animation.",
+                "        self.add_sound(",
+                f"            {python_literal(audio_path)}",
+                "        )",
+                "",
+            ])
+
+        # ====================================================
+        # STEP LABEL TRANSITION
+        # ====================================================
+
+        if i == 1:
+
+            lines.extend([
+                "        self.play(",
+                "            FadeIn(step_label),",
+                f"            run_time={min(0.35, visual_budget):.2f},",
+                "        )",
+                "",
+            ])
+
+        else:
+
+            lines.extend([
+                "        self.play(",
+                "            FadeOut(previous_step_label),",
+                "            FadeIn(step_label),",
+                f"            run_time={min(0.30, visual_budget):.2f},",
+                "        )",
+                "",
+            ])
+
+        # ====================================================
+        # VISUAL DIAGRAM ACTION DURING SPEECH
+        # ====================================================
+
+        add_visual_action(
+            lines,
+            visual_action,
+            diagram_spec,
+            visual_budget,
+        )
+
+        lines.append("")
+
+        # ====================================================
+        # EQUATION TRANSITION DURING SPEECH
+        # ====================================================
+
+        equation_runtime = min(
+            0.75,
+            max(
+                0.35,
+                visual_budget * 0.55,
+            ),
+        )
+
+        if i == 1:
+
+            lines.extend([
+                "        self.play(",
+                "            Write(tex),",
+                f"            run_time={equation_runtime:.2f},",
+                "        )",
+                "",
+            ])
+
+        else:
+
+            lines.extend([
+                "        self.play(",
+                "            FadeOut(previous_equation),",
+                "            Write(tex),",
+                f"            run_time={equation_runtime:.2f},",
+                "        )",
+                "",
+            ])
+
+        # ====================================================
+        # EXPLANATION TRANSITION DURING SPEECH
+        # ====================================================
+
+        explanation_runtime = min(
+            0.45,
+            max(
+                0.25,
+                visual_budget * 0.35,
+            ),
+        )
+
+        if i == 1:
+
+            lines.extend([
+                "        self.play(",
+                "            FadeIn(explanation),",
+                f"            run_time={explanation_runtime:.2f},",
+                "        )",
+                "",
+            ])
+
+        else:
+
+            lines.extend([
+                "        self.play(",
+                "            FadeOut(previous_explanation),",
+                "            FadeIn(explanation),",
+                f"            run_time={explanation_runtime:.2f},",
+                "        )",
+                "",
+            ])
+
+        # ====================================================
+        # ESTIMATE ELAPSED ANIMATION TIME
+        # ====================================================
+
+        label_time = (
+            min(
+                0.35 if i == 1 else 0.30,
+                visual_budget,
+            )
+        )
+
+        # add_visual_action may use roughly visual_budget
+        diagram_time = (
+            visual_budget
+            if diagram_spec
+            else 0.0
+        )
+
+        estimated_elapsed = (
+            label_time
+            + diagram_time
+            + equation_runtime
+            + explanation_runtime
+        )
+
+        # ====================================================
+        # WAIT ONLY FOR REMAINDER OF NARRATION
+        # ====================================================
+
+        if narration_duration > 0:
+
+            remaining = (
+                narration_duration
+                - estimated_elapsed
             )
 
-        # ====================================================
-        # WAIT FOR NARRATION
-        # ====================================================
+            # Small buffer only.
+            if remaining > 0.15:
 
-        script_lines.append(
-            f"        self.wait("
-            f"{max(duration, 1.5):.2f}"
-            f")"
-        )
+                lines.extend([
+                    f"        self.wait({remaining:.2f})",
+                    "",
+                ])
 
-        # ====================================================
-        # CLEAN STEP
-        # ====================================================
+        else:
 
-        script_lines.append(
-            "        self.play("
-            "FadeOut(step_label), "
-            "FadeOut(explanation), "
-            "run_time=0.4"
-            ")"
-        )
+            # If TTS failed, leave enough time to read.
+            lines.extend([
+                "        self.wait(2.2)",
+                "",
+            ])
 
-        script_lines.append(
-            "        previous_equation = tex"
-        )
-
-        script_lines.append("")
+        lines.extend([
+            "        previous_equation = tex",
+            "        previous_explanation = explanation",
+            "        previous_step_label = step_label",
+            "",
+        ])
 
     # ========================================================
     # FINAL ANSWER
@@ -995,61 +1546,51 @@ def build_direct_manim_script(
 
         if final_latex:
 
-            script_lines.append(
-                "        final_box = SurroundingRectangle("
-                "previous_equation, "
-                "color=YELLOW, "
-                "buff=0.25"
-                ")"
-            )
+            lines.extend([
+                "",
+                "        # ========================================",
+                "        # FINAL ANSWER HIGHLIGHT",
+                "        # ========================================",
+                "",
+                "        final_box = SurroundingRectangle(",
+                "            previous_equation,",
+                "            color=YELLOW,",
+                "            buff=0.25,",
+                "            corner_radius=0.08,",
+                "        )",
+                "",
+                "        final_text = Text(",
+                "            'Final Answer',",
+                "            font_size=25,",
+                "            weight=BOLD,",
+                "        )",
+                "",
+                "        final_text.next_to(",
+                "            final_box,",
+                "            UP,",
+                "            buff=0.20,",
+                "        )",
+                "",
+                "        self.play(",
+                "            Create(final_box),",
+                "            FadeIn(final_text),",
+                "            run_time=0.65,",
+                "        )",
+                "",
+                # Short viewing buffer, not 2+ seconds.
+                "        self.wait(0.75)",
+            ])
 
-            script_lines.append(
-                "        final_text = Text("
-                f"{python_literal('Final Answer')}, "
-                "font_size=28"
-                ")"
-            )
-
-            script_lines.append(
-                "        final_text.next_to("
-                "final_box, "
-                "UP, "
-                "buff=0.25"
-                ")"
-            )
-
-            script_lines.append(
-                "        self.play("
-                "Create(final_box), "
-                "FadeIn(final_text), "
-                "run_time=0.8"
-                ")"
-            )
-
-            script_lines.append(
-                "        self.wait(2)"
-            )
-
-        else:
-
-            script_lines.append(
-                "        self.wait(1)"
-            )
-
-    else:
-
-        script_lines.append(
-            "        self.wait(1)"
-        )
-
-    return "\n".join(script_lines)
+    return "\n".join(lines)
 
 
 # ============================================================
 # GEMINI
 # ============================================================
 
-def generate_with_gemini(prompt: str) -> str:
+def generate_with_gemini(
+    prompt: str,
+) -> str:
 
     from google import genai
 
@@ -1058,6 +1599,7 @@ def generate_with_gemini(prompt: str) -> str:
     )
 
     if not api_key:
+
         raise RuntimeError(
             "GEMINI_API_KEY is not configured."
         )
@@ -1076,6 +1618,7 @@ def generate_with_gemini(prompt: str) -> str:
     )
 
     if not response.text:
+
         raise RuntimeError(
             "Gemini returned an empty response."
         )
@@ -1089,7 +1632,9 @@ def generate_with_gemini(prompt: str) -> str:
 # GROQ
 # ============================================================
 
-def generate_with_groq(prompt: str) -> str:
+def generate_with_groq(
+    prompt: str,
+) -> str:
 
     from groq import Groq
 
@@ -1098,6 +1643,7 @@ def generate_with_groq(prompt: str) -> str:
     )
 
     if not api_key:
+
         raise RuntimeError(
             "GROQ_API_KEY is not configured."
         )
@@ -1122,12 +1668,14 @@ def generate_with_groq(prompt: str) -> str:
     )
 
     content = (
-        response.choices[0]
+        response
+        .choices[0]
         .message
         .content
     )
 
     if not content:
+
         raise RuntimeError(
             "Groq returned an empty response."
         )
@@ -1153,602 +1701,757 @@ def generate_with_openrouter(
     )
 
     if not api_key:
+
         raise RuntimeError(
             "OPENROUTER_API_KEY is not configured."
         )
 
     client = OpenAI(
         api_key=api_key,
-        base_url="https://openrouter.ai/api/v1", 
-    ) 
- 
-    response = client.chat.completions.create( 
-        model=model, 
-        messages=[ 
-            { 
-                "role": "system", 
-                "content": SYSTEM_PROMPT, 
-            }, 
-            { 
-                "role": "user", 
-                "content": prompt, 
-            }, 
-        ], 
-        temperature=0.2, 
-    ) 
- 
-    content = ( 
-        response.choices[0] 
-        .message 
-        .content 
-    ) 
- 
-    if not content: 
-        raise RuntimeError( 
-            "OpenRouter returned an empty response." 
-        ) 
- 
-    return clean_code_block( 
-        content 
-    ) 
- 
- 
-# ============================================================ 
-# AI FALLBACK 
-# ============================================================ 
- 
-def generate_ai_manim_code(prompt: str): 
- 
-    providers = [] 
- 
-    if os.getenv("GEMINI_API_KEY"): 
- 
-        providers.append( 
-            ( 
-                "gemini", 
-                lambda: generate_with_gemini( 
-                    prompt 
-                ), 
-            ) 
-        ) 
- 
-    if os.getenv("GROQ_API_KEY"): 
- 
-        providers.append( 
-            ( 
-                "groq", 
-                lambda: generate_with_groq( 
-                    prompt 
-                ), 
-            ) 
-        ) 
- 
-    if os.getenv("OPENROUTER_API_KEY"): 
- 
-        providers.append( 
-            ( 
-                "openrouter-free", 
-                lambda: generate_with_openrouter( 
-                    prompt, 
-                    "openrouter/free", 
-                ), 
-            ) 
-        ) 
- 
-        providers.append( 
-            ( 
-                "openrouter-cohere", 
-                lambda: generate_with_openrouter( 
-                    prompt, 
-                    "cohere/north-mini-code:free", 
-                ), 
-            ) 
-        ) 
- 
-    if not providers: 
- 
-        raise RuntimeError( 
-            "No AI provider API keys are configured." 
-        ) 
- 
-    errors = [] 
- 
-    for provider_name, provider_function in providers: 
- 
-        try: 
- 
-            print( 
-                f"Trying AI provider: " 
-                f"{provider_name}" 
-            ) 
- 
-            code = provider_function() 
- 
-            if ( 
-                code 
-                and 
-                "GeneratedScene" in code 
-            ): 
- 
-                return ( 
-                    code, 
-                    provider_name, 
-                ) 
- 
-            errors.append( 
-                f"{provider_name}: invalid generated code" 
-            ) 
- 
-        except Exception as exc: 
- 
-            print( 
-                f"{provider_name} failed: {exc}" 
-            ) 
- 
-            errors.append( 
-                f"{provider_name}: {exc}" 
-            ) 
- 
-    raise RuntimeError( 
-        "All AI providers failed:\n" 
-        + "\n".join(errors) 
-    ) 
- 
- 
-# ============================================================ 
-# VALIDATE MANIM CODE 
-# ============================================================ 
- 
-def validate_manim_code(code: str): 
- 
-    if not code: 
- 
-        raise ValueError( 
-            "Generated Manim code is empty." 
-        ) 
- 
-    forbidden = [ 
-        "manim_voiceover", 
-        "VoiceoverScene", 
-        "EdgeTTSService", 
-    ] 
- 
-    for item in forbidden: 
- 
-        if item in code: 
- 
-            raise ValueError( 
-                f"Generated code contains " 
-                f"forbidden dependency: {item}" 
-            ) 
- 
-    if "class GeneratedScene(Scene)" not in code: 
- 
-        raise ValueError( 
-            "Generated code does not contain " 
-            "GeneratedScene." 
-        ) 
- 
-    if "from manim import *" not in code: 
- 
-        raise ValueError( 
-            "Generated code does not import Manim." 
-        ) 
- 
- 
-# ============================================================ 
-# RENDER MANIM 
-# ============================================================ 
- 
-def render_manim_script( 
-    script_path: Path, 
-    job_id: str, 
-) -> Path: 
- 
-    print( 
-        f"Starting Manim render: {job_id}" 
-    ) 
- 
-    job_media_dir = ( 
-        MEDIA_DIR / 
-        job_id 
-    ) 
- 
-    job_media_dir.mkdir( 
-        parents=True, 
-        exist_ok=True, 
-    ) 
- 
-    manim_cmd = [ 
-        "manim", 
-        "-ql", 
-        "--disable_caching", 
-        "--media_dir", 
-        str(job_media_dir), 
-        str(script_path), 
-        "GeneratedScene", 
-    ] 
- 
-    print( 
-        "Running:", 
-        " ".join(manim_cmd), 
-    ) 
- 
-    process = subprocess.run( 
-        manim_cmd, 
-        capture_output=True, 
-        text=True, 
-        timeout=600, 
-    ) 
- 
-    print("MANIM STDOUT:") 
-    print(process.stdout) 
- 
-    print("MANIM STDERR:") 
-    print(process.stderr) 
- 
-    if process.returncode != 0: 
- 
-        raise RuntimeError( 
-            "Manim rendering failed.\n\n" 
-            + process.stdout 
-            + "\n\n" 
-            + process.stderr 
-        ) 
- 
-    # ======================================================== 
-    # FIND ONLY THIS JOB'S VIDEO 
-    # ======================================================== 
- 
-    video_files = list( 
-        job_media_dir.rglob( 
-            "GeneratedScene.mp4" 
-        ) 
-    ) 
- 
-    if not video_files: 
- 
-        video_files = list( 
-            job_media_dir.rglob("*.mp4") 
-        ) 
- 
-    if not video_files: 
- 
-        raise RuntimeError( 
-            "Manim finished successfully but " 
-            "no MP4 file was found." 
-        ) 
- 
-    source_video = max( 
-        video_files, 
-        key=lambda p: p.stat().st_mtime, 
-    ) 
- 
-    final_video = ( 
-        OUTPUT_DIR / 
-        f"{job_id}.mp4" 
-    ) 
- 
-    shutil.copy2( 
-        source_video, 
-        final_video, 
-    ) 
- 
-    print( 
-        f"Video created: {final_video}" 
-    ) 
- 
-    return final_video 
- 
- 
-# ============================================================ 
-# ROOT / HEALTH 
-# ============================================================ 
- 
-@app.get("/") 
-def root(): 
- 
-    return { 
-        "status": "online", 
-        "service": "Tezla Animator Rendering Engine", 
-        "version": APP_VERSION, 
-        "renderer": "Manim", 
-        "tts": "Edge TTS", 
-        "sympy": False, 
-        "diagrams": True, 
-        "latex_normalization": True, 
-    } 
- 
- 
-# ============================================================ 
-# ENGINE TEST 
-# ============================================================ 
- 
-@app.get("/engine-test") 
-def engine_test(): 
- 
-    results = {} 
- 
-    # -------------------------------------------------------- 
-    # MANIM 
-    # -------------------------------------------------------- 
- 
-    try: 
- 
-        result = subprocess.run( 
-            ["manim", "--version"], 
-            capture_output=True, 
-            text=True, 
-            timeout=20, 
-        ) 
- 
-        results["manim"] = { 
-            "available": result.returncode == 0, 
-            "version": ( 
-                result.stdout.strip() 
-                or result.stderr.strip() 
-            ), 
-        } 
- 
-    except Exception as exc: 
- 
-        results["manim"] = { 
-            "available": False, 
-            "error": str(exc), 
-        } 
- 
-    # -------------------------------------------------------- 
-    # EDGE TTS 
-    # -------------------------------------------------------- 
- 
-    try: 
- 
-        import edge_tts 
- 
-        results["edge_tts"] = { 
-            "available": True, 
-            "version": getattr( 
-                edge_tts, 
-                "__version__", 
-                "installed", 
-            ), 
-        } 
- 
-    except Exception as exc: 
- 
-        results["edge_tts"] = { 
-            "available": False, 
-            "error": str(exc), 
-        } 
- 
-    # -------------------------------------------------------- 
-    # FFPROBE 
-    # -------------------------------------------------------- 
- 
-    try: 
- 
-        result = subprocess.run( 
-            ["ffprobe", "-version"], 
-            capture_output=True, 
-            text=True, 
-            timeout=20, 
-        ) 
- 
-        results["ffprobe"] = { 
-            "available": result.returncode == 0, 
-            "version": ( 
-                result.stdout.splitlines()[0] 
-                if result.stdout 
-                else "installed" 
-            ), 
-        } 
- 
-    except Exception as exc: 
- 
-        results["ffprobe"] = { 
-            "available": False, 
-            "error": str(exc), 
-        } 
- 
-    return { 
-        "status": "ok", 
-        "version": APP_VERSION, 
-        "results": results, 
-    } 
- 
- 
-# ============================================================ 
-# GENERATE VIDEO 
-# ============================================================ 
- 
-@app.post("/generate-video") 
-def generate_video( 
-    req: RenderRequest, 
-): 
- 
-    job_id = str(uuid.uuid4()) 
- 
-    print("=" * 70) 
-    print(f"NEW VIDEO JOB: {job_id}") 
-    print("=" * 70) 
- 
-    print("Prompt:") 
-    print(req.prompt) 
- 
-    print( 
-        "Solution steps:", 
-        len(req.solution_steps or []), 
-    ) 
- 
-    print( 
-        "Diagram:", 
-        req.diagram_spec, 
-    ) 
- 
-    script_path = ( 
-        BASE_DIR / 
-        f"{job_id}.py" 
-    ) 
- 
-    provider_used = ( 
-        "direct-solution-steps" 
-    ) 
- 
-    try: 
- 
-        # ==================================================== 
-        # LOVABLE SOLUTION STEPS 
-        # ==================================================== 
- 
-        if req.solution_steps: 
- 
-            print( 
-                "Using Lovable-provided " 
-                "solution steps." 
-            ) 
- 
-            code = build_direct_manim_script( 
-                prompt=req.prompt, 
-                steps=req.solution_steps, 
-                job_id=job_id, 
-                diagram_spec=req.diagram_spec, 
-            ) 
- 
-        # ==================================================== 
-        # AI FALLBACK 
-        # ==================================================== 
- 
-        else: 
- 
-            print( 
-                "No solution steps received." 
-            ) 
- 
-            print( 
-                "Using AI Manim fallback." 
-            ) 
- 
-            code, provider_used = ( 
-                generate_ai_manim_code( 
-                    req.prompt 
-                ) 
-            ) 
- 
-        # ==================================================== 
-        # VALIDATE 
-        # ==================================================== 
- 
-        validate_manim_code( 
-            code 
-        ) 
- 
-        # ==================================================== 
-        # LOG GENERATED SCRIPT 
-        # ======================================================== 
- 
-        print("GENERATED MANIM SCRIPT:") 
-        print("-" * 70) 
-        print(code) 
-        print("-" * 70) 
- 
-        # ==================================================== 
-        # WRITE SCRIPT 
-        # ==================================================== 
- 
-        script_path.write_text( 
-            code, 
-            encoding="utf-8", 
-        ) 
- 
-        print( 
-            f"Script saved: {script_path}" 
-        ) 
- 
-        # ==================================================== 
-        # RENDER 
-        # ==================================================== 
- 
-        final_video = render_manim_script( 
-            script_path, 
-            job_id, 
-        ) 
- 
-        # ==================================================== 
-        # RESPONSE 
-        # ==================================================== 
- 
-        video_url = ( 
-            f"/videos/{final_video.name}" 
-        ) 
- 
-        print( 
-            f"VIDEO READY: {video_url}" 
-        ) 
- 
-        return { 
-            "status": "success", 
-            "job_id": job_id, 
-            "provider_used": provider_used, 
-            "video_url": video_url, 
-        } 
- 
-    except subprocess.TimeoutExpired: 
- 
-        raise HTTPException( 
-            status_code=504, 
-            detail=( 
-                "Manim rendering timed out " 
-                "after 600 seconds." 
-            ), 
-        ) 
- 
-    except Exception as exc: 
- 
-        print( 
-            f"JOB FAILED: {job_id}" 
-        ) 
- 
-        print( 
-            f"ERROR: {exc}" 
-        ) 
- 
-        raise HTTPException( 
-            status_code=500, 
-            detail=str(exc), 
-        ) 
- 
-    finally: 
- 
-        try: 
- 
-            if script_path.exists(): 
-                script_path.unlink() 
- 
-        except Exception as exc: 
- 
-            print( 
-                "Could not delete temporary " 
-                f"script: {exc}" 
-            ) 
- 
- 
-# ============================================================ 
-# LOCAL DEVELOPMENT 
-# ============================================================ 
- 
-if __name__ == "__main__": 
- 
-    import uvicorn 
- 
-    port = int( 
-        os.getenv( 
-            "PORT", 
-            "8000", 
-        ) 
-    ) 
- 
-    uvicorn.run( 
-        app, 
-        host="0.0.0.0", 
-        port=port, 
-    ) 
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        temperature=0.2,
+    )
+
+    content = (
+        response
+        .choices[0]
+        .message
+        .content
+    )
+
+    if not content:
+
+        raise RuntimeError(
+            "OpenRouter returned an empty response."
+        )
+
+    return clean_code_block(
+        content
+    )
+
+
+# ============================================================
+# AI FALLBACK
+# ============================================================
+
+def generate_ai_manim_code(
+    prompt: str,
+):
+
+    providers = []
+
+    if os.getenv(
+        "GEMINI_API_KEY"
+    ):
+
+        providers.append(
+            (
+                "gemini",
+                lambda: generate_with_gemini(
+                    prompt
+                ),
+            )
+        )
+
+    if os.getenv(
+        "GROQ_API_KEY"
+    ):
+
+        providers.append(
+            (
+                "groq",
+                lambda: generate_with_groq(
+                    prompt
+                ),
+            )
+        )
+
+    if os.getenv(
+        "OPENROUTER_API_KEY"
+    ):
+
+        providers.append(
+            (
+                "openrouter-free",
+                lambda: generate_with_openrouter(
+                    prompt,
+                    "openrouter/free",
+                ),
+            )
+        )
+
+        providers.append(
+            (
+                "openrouter-cohere",
+                lambda: generate_with_openrouter(
+                    prompt,
+                    "cohere/north-mini-code:free",
+                ),
+            )
+        )
+
+    if not providers:
+
+        raise RuntimeError(
+            "No AI provider API keys are configured."
+        )
+
+    errors = []
+
+    for (
+        provider_name,
+        provider_function,
+    ) in providers:
+
+        try:
+
+            print(
+                f"Trying AI provider: "
+                f"{provider_name}"
+            )
+
+            code = (
+                provider_function()
+            )
+
+            if (
+                code
+                and
+                "GeneratedScene" in code
+            ):
+
+                return (
+                    code,
+                    provider_name,
+                )
+
+            errors.append(
+                f"{provider_name}: "
+                "invalid generated code"
+            )
+
+        except Exception as exc:
+
+            print(
+                f"{provider_name} failed: "
+                f"{exc}"
+            )
+
+            errors.append(
+                f"{provider_name}: {exc}"
+            )
+
+    raise RuntimeError(
+        "All AI providers failed:\n"
+        + "\n".join(errors)
+    )
+
+
+# ============================================================
+# VALIDATE MANIM CODE
+# ============================================================
+
+def validate_manim_code(
+    code: str,
+):
+
+    if not code:
+
+        raise ValueError(
+            "Generated Manim code is empty."
+        )
+
+    forbidden = [
+        "manim_voiceover",
+        "VoiceoverScene",
+        "EdgeTTSService",
+    ]
+
+    for item in forbidden:
+
+        if item in code:
+
+            raise ValueError(
+                "Generated code contains "
+                f"forbidden dependency: {item}"
+            )
+
+    if (
+        "class GeneratedScene(Scene)"
+        not in code
+    ):
+
+        raise ValueError(
+            "Generated code does not contain "
+            "GeneratedScene."
+        )
+
+    if (
+        "from manim import *"
+        not in code
+    ):
+
+        raise ValueError(
+            "Generated code does not import Manim."
+        )
+
+
+# ============================================================
+# RENDER MANIM
+# ============================================================
+
+def render_manim_script(
+    script_path: Path,
+    job_id: str,
+) -> Path:
+
+    print(
+        f"Starting Manim render: {job_id}"
+    )
+
+    job_media_dir = (
+        MEDIA_DIR /
+        job_id
+    )
+
+    job_media_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    manim_cmd = [
+        "manim",
+        "-ql",
+        "--disable_caching",
+        "--media_dir",
+        str(job_media_dir),
+        str(script_path),
+        "GeneratedScene",
+    ]
+
+    print(
+        "Running:",
+        " ".join(manim_cmd),
+    )
+
+    process = subprocess.run(
+        manim_cmd,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+
+    print("MANIM STDOUT:")
+    print(process.stdout)
+
+    print("MANIM STDERR:")
+    print(process.stderr)
+
+    if process.returncode != 0:
+
+        raise RuntimeError(
+            "Manim rendering failed.\n\n"
+            + process.stdout
+            + "\n\n"
+            + process.stderr
+        )
+
+    video_files = list(
+        job_media_dir.rglob(
+            "GeneratedScene.mp4"
+        )
+    )
+
+    if not video_files:
+
+        video_files = list(
+            job_media_dir.rglob(
+                "*.mp4"
+            )
+        )
+
+    if not video_files:
+
+        raise RuntimeError(
+            "Manim finished successfully but "
+            "no MP4 file was found."
+        )
+
+    source_video = max(
+        video_files,
+        key=lambda p: p.stat().st_mtime,
+    )
+
+    final_video = (
+        OUTPUT_DIR /
+        f"{job_id}.mp4"
+    )
+
+    shutil.copy2(
+        source_video,
+        final_video,
+    )
+
+    print(
+        f"Video created: {final_video}"
+    )
+
+    return final_video
+
+
+# ============================================================
+# ROOT
+# ============================================================
+
+@app.get("/")
+def root():
+
+    return {
+        "status": "online",
+        "service": "Tezla Animator Rendering Engine",
+        "version": APP_VERSION,
+        "renderer": "Manim",
+        "tts": "Edge TTS",
+        "voice": DEFAULT_VOICE,
+        "sympy": False,
+        "teaching_timeline": True,
+        "visual_actions": True,
+        "audio_synchronization": True,
+        "diagrams": True,
+        "latex_normalization": True,
+    }
+
+
+# ============================================================
+# ENGINE TEST
+# ============================================================
+
+@app.get("/engine-test")
+def engine_test():
+
+    results = {}
+
+    # MANIM
+    try:
+
+        result = subprocess.run(
+            [
+                "manim",
+                "--version",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        results["manim"] = {
+            "available": (
+                result.returncode == 0
+            ),
+            "version": (
+                result.stdout.strip()
+                or
+                result.stderr.strip()
+            ),
+        }
+
+    except Exception as exc:
+
+        results["manim"] = {
+            "available": False,
+            "error": str(exc),
+        }
+
+    # EDGE TTS
+    try:
+
+        import edge_tts
+
+        results["edge_tts"] = {
+            "available": True,
+            "version": getattr(
+                edge_tts,
+                "__version__",
+                "installed",
+            ),
+            "voice": DEFAULT_VOICE,
+        }
+
+    except Exception as exc:
+
+        results["edge_tts"] = {
+            "available": False,
+            "error": str(exc),
+        }
+
+    # FFPROBE
+    try:
+
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-version",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        results["ffprobe"] = {
+            "available": (
+                result.returncode == 0
+            ),
+            "version": (
+                result.stdout.splitlines()[0]
+                if result.stdout
+                else "installed"
+            ),
+        }
+
+    except Exception as exc:
+
+        results["ffprobe"] = {
+            "available": False,
+            "error": str(exc),
+        }
+
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "results": results,
+    }
+
+
+# ============================================================
+# TTS TEST
+# ============================================================
+
+@app.get("/tts-test")
+def tts_test():
+    """
+    Useful diagnostic endpoint.
+
+    Confirms that Render can actually contact Edge TTS,
+    generate an MP3, and determine its duration.
+    """
+
+    test_id = str(
+        uuid.uuid4()
+    )
+
+    test_dir = (
+        VOICE_DIR /
+        "tests"
+    )
+
+    test_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    audio_file = (
+        test_dir /
+        f"{test_id}.mp3"
+    )
+
+    test_text = (
+        "Welcome to Tezla Animator. "
+        "This is a test of the mathematics "
+        "lesson narration system."
+    )
+
+    try:
+
+        generate_edge_tts_sync(
+            test_text,
+            str(audio_file),
+            DEFAULT_VOICE,
+        )
+
+        if not audio_file.exists():
+
+            raise RuntimeError(
+                "Edge TTS completed but no "
+                "audio file was created."
+            )
+
+        duration = get_audio_duration(
+            str(audio_file)
+        )
+
+        size = (
+            audio_file.stat().st_size
+        )
+
+        return {
+            "status": "success",
+            "voice": DEFAULT_VOICE,
+            "duration_seconds": duration,
+            "size_bytes": size,
+        }
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    finally:
+
+        try:
+
+            if audio_file.exists():
+                audio_file.unlink()
+
+        except Exception:
+            pass
+
+
+# ============================================================
+# GENERATE VIDEO
+# ============================================================
+
+@app.post("/generate-video")
+def generate_video(
+    req: RenderRequest,
+):
+
+    job_id = str(
+        uuid.uuid4()
+    )
+
+    print("=" * 70)
+    print(
+        f"NEW VIDEO JOB: {job_id}"
+    )
+    print("=" * 70)
+
+    print("Prompt:")
+    print(req.prompt)
+
+    print(
+        "Solution steps:",
+        len(
+            req.solution_steps or []
+        ),
+    )
+
+    print(
+        "Diagram:",
+        req.diagram_spec,
+    )
+
+    if req.solution_steps:
+
+        for step in req.solution_steps:
+
+            print(
+                f"STEP {step.step_number}"
+            )
+
+            print(
+                "Math:",
+                step.math_latex,
+            )
+
+            print(
+                "Explanation:",
+                step.explanation,
+            )
+
+            print(
+                "Visual action:",
+                step.visual_action,
+            )
+
+    script_path = (
+        BASE_DIR /
+        f"{job_id}.py"
+    )
+
+    provider_used = (
+        "direct-solution-steps-v5"
+    )
+
+    try:
+
+        # ====================================================
+        # LOVABLE-PROVIDED TEACHING STEPS
+        # ====================================================
+
+        if req.solution_steps:
+
+            print(
+                "Using Lovable-provided "
+                "teaching steps."
+            )
+
+            code = (
+                build_direct_manim_script(
+                    prompt=req.prompt,
+                    steps=req.solution_steps,
+                    job_id=job_id,
+                    diagram_spec=req.diagram_spec,
+                )
+            )
+
+        # ====================================================
+        # AI FALLBACK
+        # ====================================================
+
+        else:
+
+            print(
+                "No solution steps received."
+            )
+
+            print(
+                "Using AI Manim fallback."
+            )
+
+            (
+                code,
+                provider_used,
+            ) = generate_ai_manim_code(
+                req.prompt
+            )
+
+        # ====================================================
+        # VALIDATE
+        # ====================================================
+
+        validate_manim_code(
+            code
+        )
+
+        # ====================================================
+        # LOG SCRIPT
+        # ====================================================
+
+        print(
+            "GENERATED MANIM SCRIPT:"
+        )
+
+        print("-" * 70)
+        print(code)
+        print("-" * 70)
+
+        # ====================================================
+        # WRITE SCRIPT
+        # ====================================================
+
+        script_path.write_text(
+            code,
+            encoding="utf-8",
+        )
+
+        print(
+            f"Script saved: {script_path}"
+        )
+
+        # ====================================================
+        # RENDER
+        # ====================================================
+
+        final_video = (
+            render_manim_script(
+                script_path,
+                job_id,
+            )
+        )
+
+        # ====================================================
+        # RESPONSE
+        # ====================================================
+
+        video_url = (
+            f"/videos/{final_video.name}"
+        )
+
+        print(
+            f"VIDEO READY: {video_url}"
+        )
+
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "provider_used": provider_used,
+            "video_url": video_url,
+            "version": APP_VERSION,
+        }
+
+    except subprocess.TimeoutExpired:
+
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Manim rendering timed out "
+                "after 600 seconds."
+            ),
+        )
+
+    except Exception as exc:
+
+        print(
+            f"JOB FAILED: {job_id}"
+        )
+
+        print(
+            f"ERROR: {exc}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    finally:
+
+        try:
+
+            if script_path.exists():
+                script_path.unlink()
+
+        except Exception as exc:
+
+            print(
+                "Could not delete temporary "
+                f"script: {exc}"
+            )
+
+
+# ============================================================
+# LOCAL DEVELOPMENT
+# ============================================================
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "8000",
+        )
+    )
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+    )
