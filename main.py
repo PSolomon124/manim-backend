@@ -17,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "5.0.0"
+APP_VERSION = "6.0.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -68,9 +68,11 @@ class SolutionStep(BaseModel):
     math_latex: str
     explanation: str
 
-    # NEW V5 FIELDS
+    # Visual planning metadata from Lovable.
     visual_action: Optional[str] = None
     emphasis: Optional[List[str]] = None
+    scene: Optional[str] = None
+    equation_state: Optional[str] = None
 
 
 class RenderRequest(BaseModel):
@@ -611,7 +613,7 @@ def add_diagram_setup(
             "",
             "        base_line = Line(",
             "            p1, p2,",
-            "            color=YELLOW,",
+            "            color=TEZLA_GOLD,",
             "            stroke_width=6,",
             "        )",
             "",
@@ -1161,7 +1163,7 @@ def build_direct_manim_script(
     )
 
     lines.append(
-        '        self.camera.background_color = "#0b1220"'
+        '        self.camera.background_color = "#07111f"'
     )
 
     lines.append("")
@@ -1171,31 +1173,38 @@ def build_direct_manim_script(
     # ========================================================
 
     lines.extend([
+        "        # Tezla Animator visual identity",
+        '        TEZLA_CYAN = "#22D3EE"',
+        '        TEZLA_GOLD = "#FBBF24"',
+        '        TEZLA_PANEL = "#0F1B2D"',
+        '        MUTED = "#94A3B8"',
+        "",
+        "        brand = Text(",
+        "            'TEZLA ANIMATOR',",
+        "            font_size=18,",
+        "            weight=BOLD,",
+        "            color=TEZLA_CYAN,",
+        "        )",
+        "        brand.to_corner(UL, buff=0.28)",
+        "",
         "        title = Text(",
         f"            {python_literal(title)},",
-        "            font_size=30,",
+        "            font_size=28,",
         "            weight=BOLD,",
         "        )",
-        "",
-        "        title.scale_to_fit_width(12.0)",
-        "        title.to_edge(UP, buff=0.25)",
+        "        title.scale_to_fit_width(10.2)",
+        "        title.to_edge(UP, buff=0.28)",
         "",
         "        divider = Line(",
-        "            LEFT * 6.4,",
-        "            RIGHT * 6.4,",
-        "            stroke_opacity=0.25,",
+        "            LEFT * 6.4, RIGHT * 6.4,",
+        "            color=TEZLA_CYAN,",
+        "            stroke_opacity=0.32,",
         "        )",
-        "",
-        "        divider.next_to(",
-        "            title,",
-        "            DOWN,",
-        "            buff=0.18,",
-        "        )",
+        "        divider.next_to(title, DOWN, buff=0.16)",
         "",
         "        self.play(",
-        "            FadeIn(title),",
-        "            Create(divider),",
-        "            run_time=0.65,",
+        "            FadeIn(brand), FadeIn(title), Create(divider),",
+        "            run_time=0.55,",
         "        )",
         "",
     ])
@@ -1258,6 +1267,21 @@ def build_direct_manim_script(
             or ""
         )
 
+        scene_type = str(
+            step.scene or "equation"
+        ).strip().lower()
+
+        equation_state = str(
+            step.equation_state
+            or ("introduce" if i == 1 else "transform")
+        ).strip().lower()
+
+        emphasis = [
+            str(item).strip()
+            for item in (step.emphasis or [])
+            if str(item).strip()
+        ]
+
         # Reserve most of narration for actual teaching.
         #
         # Do not let entrance animation consume entire speech.
@@ -1302,10 +1326,10 @@ def build_direct_manim_script(
             lines.extend([
                 "        tex = MathTex(",
                 f"            {python_literal(latex)},",
-                "            font_size=48,",
+                "            font_size=42,",
                 "        )",
                 "",
-                "        tex.scale_to_fit_width(5.4)",
+                "        tex.scale_to_fit_width(5.0)",
                 "        tex.move_to(equation_anchor)",
                 "",
             ])
@@ -1331,11 +1355,11 @@ def build_direct_manim_script(
             lines.extend([
                 "        explanation = Text(",
                 f"            {python_literal(display_explanation)},",
-                "            font_size=19,",
+                "            font_size=18,",
                 "            line_spacing=0.85,",
                 "        )",
                 "",
-                "        explanation.scale_to_fit_width(5.4)",
+                "        explanation.scale_to_fit_width(5.0)",
                 "        explanation.move_to(explanation_anchor)",
                 "",
             ])
@@ -1414,14 +1438,14 @@ def build_direct_manim_script(
         # ====================================================
 
         equation_runtime = min(
-            0.75,
+            0.70,
             max(
-                0.35,
-                visual_budget * 0.55,
+                0.30,
+                visual_budget * 0.48,
             ),
         )
 
-        if i == 1:
+        if i == 1 or equation_state == "introduce":
 
             lines.extend([
                 "        self.play(",
@@ -1431,13 +1455,58 @@ def build_direct_manim_script(
                 "",
             ])
 
+        elif equation_state == "hold":
+
+            # Keep the current equation on screen during prose-only
+            # narration. If Lovable supplied a different equation,
+            # transition to it safely.
+            if latex == clean_latex(steps[i - 2].math_latex):
+
+                lines.extend([
+                    "        tex = previous_equation",
+                    "        self.play(",
+                    "            Indicate(previous_equation, color=TEZLA_CYAN),",
+                    f"            run_time={equation_runtime:.2f},",
+                    "        )",
+                    "",
+                ])
+
+            else:
+
+                lines.extend([
+                    "        self.play(",
+                    "            ReplacementTransform(previous_equation, tex),",
+                    f"            run_time={equation_runtime:.2f},",
+                    "        )",
+                    "",
+                ])
+
+        elif equation_state in {"transform", "final"}:
+
+            lines.extend([
+                "        self.play(",
+                "            ReplacementTransform(previous_equation, tex),",
+                f"            run_time={equation_runtime:.2f},",
+                "        )",
+                "",
+            ])
+
         else:
 
             lines.extend([
                 "        self.play(",
-                "            FadeOut(previous_equation),",
-                "            Write(tex),",
+                "            ReplacementTransform(previous_equation, tex),",
                 f"            run_time={equation_runtime:.2f},",
+                "        )",
+                "",
+            ])
+
+        if emphasis:
+
+            lines.extend([
+                "        self.play(",
+                "            Indicate(tex, color=TEZLA_GOLD),",
+                f"            run_time={min(0.40, equation_runtime):.2f},",
                 "        )",
                 "",
             ])
@@ -1486,10 +1555,18 @@ def build_direct_manim_script(
             )
         )
 
-        # add_visual_action may use roughly visual_budget
+        # Diagram actions can contain more than one play call.
+        # Use a conservative estimate and never add artificial silence
+        # merely because the visual sequence took longer than narration.
         diagram_time = (
-            visual_budget
-            if diagram_spec
+            min(visual_budget * 1.45, max(narration_duration * 0.42, 0.0))
+            if diagram_spec and narration_duration > 0
+            else (visual_budget if diagram_spec else 0.0)
+        )
+
+        emphasis_time = (
+            min(0.40, equation_runtime)
+            if emphasis
             else 0.0
         )
 
@@ -1497,6 +1574,7 @@ def build_direct_manim_script(
             label_time
             + diagram_time
             + equation_runtime
+            + emphasis_time
             + explanation_runtime
         )
 
@@ -1544,7 +1622,16 @@ def build_direct_manim_script(
             steps[-1].math_latex
         )
 
-        if final_latex:
+        last_state = str(
+            steps[-1].equation_state or ""
+        ).strip().lower()
+
+        should_highlight_final = (
+            last_state == "final"
+            or not any(step.equation_state for step in steps)
+        )
+
+        if final_latex and should_highlight_final:
 
             lines.extend([
                 "",
@@ -1560,9 +1647,10 @@ def build_direct_manim_script(
                 "        )",
                 "",
                 "        final_text = Text(",
-                "            'Final Answer',",
-                "            font_size=25,",
+                "            'KEY RESULT',",
+                "            font_size=22,",
                 "            weight=BOLD,",
+                "            color=TEZLA_GOLD,",
                 "        )",
                 "",
                 "        final_text.next_to(",
@@ -2033,6 +2121,10 @@ def root():
         "audio_synchronization": True,
         "diagrams": True,
         "latex_normalization": True,
+        "scene_metadata": True,
+        "equation_state_transitions": True,
+        "canonical_lovable_narration": True,
+        "tezla_visual_theme": True,
     }
 
 
@@ -2279,13 +2371,20 @@ def generate_video(
                 step.visual_action,
             )
 
+            print(
+                "Scene / equation state:",
+                step.scene,
+                "/",
+                step.equation_state,
+            )
+
     script_path = (
         BASE_DIR /
         f"{job_id}.py"
     )
 
     provider_used = (
-        "direct-solution-steps-v5"
+        "direct-solution-steps-v6"
     )
 
     try:
