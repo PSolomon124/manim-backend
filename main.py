@@ -17,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "6.1.0"
+APP_VERSION = "6.2.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -507,10 +507,7 @@ def prepare_step_audio(
         )
 
         if not narration:
-
-            narration = (
-                f"Now we continue with step {index}."
-            )
+            narration = " "
 
         audio_file = (
             voice_dir /
@@ -1148,9 +1145,15 @@ def build_direct_manim_script(
         job_id,
     )
 
-    title = clean_title(
-        prompt
-    )
+    title = clean_title(prompt)
+    title = re.sub(r"\$\$.*?\$\$|\$.*?\$", "", title)
+    title = re.sub(r"\\[A-Za-z]+(?:\{[^{}]*\})?", "", title)
+    title = title.replace("{", "").replace("}", "").replace("_", " ")
+    title = re.sub(r"\s+", " ", title).strip()
+    if not title or any(ch in title for ch in ("=", "^", "\\")):
+        title = "Interactive Mathematics"
+    if len(title) > 42:
+        title = title[:39].rstrip() + "..."
 
     lines = []
 
@@ -1205,7 +1208,7 @@ def build_direct_manim_script(
         "            font_size=28,",
         "            weight=BOLD,",
         "        )",
-        "        title.scale_to_fit_width(10.2)",
+        "        if title.width > 10.2:\n            title.scale_to_fit_width(10.2)",
         "        title.to_edge(UP, buff=0.28)",
         "",
         "        divider = Line(",
@@ -1237,16 +1240,11 @@ def build_direct_manim_script(
 
     lines.extend([
         "",
-        "        equation_anchor = RIGHT * 3.15 + UP * 1.15",
-        "        explanation_anchor = RIGHT * 3.15 + DOWN * 1.20",
+        f"        equation_anchor = {'RIGHT * 3.15 + UP * 0.35' if diagram_spec else 'ORIGIN + DOWN * 0.05'}",
         "",
-        "        teaching_panel = RoundedRectangle(",
-        "            width=5.65, height=5.15, corner_radius=0.22,",
-        "            stroke_color=TEZLA_CYAN, stroke_opacity=0.22,",
-        "            fill_color=TEZLA_PANEL, fill_opacity=0.42,",
-        "        )",
-        "        teaching_panel.move_to(RIGHT * 3.15 + DOWN * 0.05)",
-        "        self.play(FadeIn(teaching_panel), run_time=0.35)",
+        f"        teaching_panel = RoundedRectangle(width={5.65 if diagram_spec else 11.7}, height=4.65, corner_radius=0.22, stroke_color=TEZLA_CYAN, stroke_opacity=0.22, fill_color=TEZLA_PANEL, fill_opacity=0.35)",
+        f"        teaching_panel.move_to({'RIGHT * 3.15 + DOWN * 0.05' if diagram_spec else 'ORIGIN + DOWN * 0.05'})",
+        "        self.play(FadeIn(teaching_panel), run_time=0.30)",
         "",
         "        previous_equation = None",
         "        previous_explanation = None",
@@ -1333,7 +1331,7 @@ def build_direct_manim_script(
             "        )",
             "",
             "        step_label.move_to(",
-            "            RIGHT * 3.15 + UP * 2.55",
+            f"            {'RIGHT * 3.15 + UP * 2.55' if diagram_spec else 'LEFT * 5.0 + UP * 2.55'}",
             "        )",
             "",
         ])
@@ -1350,7 +1348,11 @@ def build_direct_manim_script(
                 "            font_size=42,",
                 "        )",
                 "",
-                "        tex.scale_to_fit_width(5.0)",
+                f"        max_equation_width = {5.0 if diagram_spec else 10.8}",
+                "        if tex.width > max_equation_width:",
+                "            tex.scale_to_fit_width(max_equation_width)",
+                "        if tex.height > 2.15:",
+                "            tex.scale_to_fit_height(2.15)",
                 "        tex.move_to(equation_anchor)",
                 "",
             ])
@@ -1368,35 +1370,13 @@ def build_direct_manim_script(
             ])
 
         # ====================================================
-        # DISPLAY EXPLANATION
+        # NARRATION DISPLAY
         # ====================================================
-
-        if display_explanation:
-
-            lines.extend([
-                "        explanation = Text(",
-                f"            {python_literal(display_explanation)},",
-                "            font_size=18,",
-                "            line_spacing=0.85,",
-                "            color=MUTED,",
-                "        )",
-                "",
-                "        explanation.scale_to_fit_width(5.0)",
-                "        explanation.move_to(explanation_anchor)",
-                "",
-            ])
-
-        else:
-
-            lines.extend([
-                "        explanation = Text(",
-                "            '',",
-                "            font_size=19,",
-                "        )",
-                "",
-                "        explanation.move_to(explanation_anchor)",
-                "",
-            ])
+        # Captions are rendered by the Lovable player near its controls.
+        lines.extend([
+            "        explanation = VGroup()",
+            "",
+        ])
 
         # ====================================================
         # START AUDIO FIRST
@@ -1545,38 +1525,7 @@ def build_direct_manim_script(
                 "",
             ])
 
-        # ====================================================
-        # EXPLANATION TRANSITION DURING SPEECH
-        # ====================================================
-
-        explanation_runtime = min(
-            0.45,
-            max(
-                0.25,
-                visual_budget * 0.35,
-            ),
-        )
-
-        if i == 1:
-
-            lines.extend([
-                "        self.play(",
-                "            FadeIn(explanation),",
-                f"            run_time={explanation_runtime:.2f},",
-                "        )",
-                "",
-            ])
-
-        else:
-
-            lines.extend([
-                "        self.play(",
-                "            FadeOut(previous_explanation),",
-                "            FadeIn(explanation),",
-                f"            run_time={explanation_runtime:.2f},",
-                "        )",
-                "",
-            ])
+        explanation_runtime = 0.0
 
         # ====================================================
         # ESTIMATE ELAPSED ANIMATION TIME
@@ -1589,14 +1538,10 @@ def build_direct_manim_script(
             )
         )
 
-        # Diagram actions can contain more than one play call.
-        # Use a conservative estimate and never add artificial silence
-        # merely because the visual sequence took longer than narration.
-        diagram_time = (
-            min(visual_budget * 1.45, max(narration_duration * 0.42, 0.0))
-            if diagram_spec and narration_duration > 0
-            else (visual_budget if diagram_spec else 0.0)
-        )
+        # Diagram actions can contain sequential plays. Do not subtract an
+        # approximate diagram duration from the audio guard; this prevents
+        # the next narration clip from starting before the current one ends.
+        diagram_time = 0.0
 
         emphasis_time = (
             min(0.40, equation_runtime)
@@ -1627,7 +1572,7 @@ def build_direct_manim_script(
             if remaining > 0.15:
 
                 lines.extend([
-                    f"        self.wait({remaining:.2f})",
+                    f"        self.wait({remaining + 0.18:.2f})",
                     "",
                 ])
 
@@ -2160,6 +2105,10 @@ def root():
         "equation_state_transitions": True,
         "canonical_lovable_narration": True,
         "tezla_visual_theme": True,
+        "adaptive_layout": True,
+        "captions_in_player_only": True,
+        "no_upscale_short_math": True,
+        "narration_overlap_guard": True,
     }
 
 
