@@ -1,4 +1,4 @@
-````python
+
 import os
 import re
 import uuid
@@ -1159,597 +1159,596 @@ def generate_with_openrouter(
 
     client = OpenAI(
         api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
-    )
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        temperature=0.2,
-    )
-
-    content = (
-        response.choices[0]
-        .message
-        .content
-    )
-
-    if not content:
-        raise RuntimeError(
-            "OpenRouter returned an empty response."
-        )
-
-    return clean_code_block(
-        content
-    )
-
-
-# ============================================================
-# AI FALLBACK
-# ============================================================
-
-def generate_ai_manim_code(prompt: str):
-
-    providers = []
-
-    if os.getenv("GEMINI_API_KEY"):
-
-        providers.append(
-            (
-                "gemini",
-                lambda: generate_with_gemini(
-                    prompt
-                ),
-            )
-        )
-
-    if os.getenv("GROQ_API_KEY"):
-
-        providers.append(
-            (
-                "groq",
-                lambda: generate_with_groq(
-                    prompt
-                ),
-            )
-        )
-
-    if os.getenv("OPENROUTER_API_KEY"):
-
-        providers.append(
-            (
-                "openrouter-free",
-                lambda: generate_with_openrouter(
-                    prompt,
-                    "openrouter/free",
-                ),
-            )
-        )
-
-        providers.append(
-            (
-                "openrouter-cohere",
-                lambda: generate_with_openrouter(
-                    prompt,
-                    "cohere/north-mini-code:free",
-                ),
-            )
-        )
-
-    if not providers:
-
-        raise RuntimeError(
-            "No AI provider API keys are configured."
-        )
-
-    errors = []
-
-    for provider_name, provider_function in providers:
-
-        try:
-
-            print(
-                f"Trying AI provider: "
-                f"{provider_name}"
-            )
-
-            code = provider_function()
-
-            if (
-                code
-                and
-                "GeneratedScene" in code
-            ):
-
-                return (
-                    code,
-                    provider_name,
-                )
-
-            errors.append(
-                f"{provider_name}: invalid generated code"
-            )
-
-        except Exception as exc:
-
-            print(
-                f"{provider_name} failed: {exc}"
-            )
-
-            errors.append(
-                f"{provider_name}: {exc}"
-            )
-
-    raise RuntimeError(
-        "All AI providers failed:\n"
-        + "\n".join(errors)
-    )
-
-
-# ============================================================
-# VALIDATE MANIM CODE
-# ============================================================
-
-def validate_manim_code(code: str):
-
-    if not code:
-
-        raise ValueError(
-            "Generated Manim code is empty."
-        )
-
-    forbidden = [
-        "manim_voiceover",
-        "VoiceoverScene",
-        "EdgeTTSService",
-    ]
-
-    for item in forbidden:
-
-        if item in code:
-
-            raise ValueError(
-                f"Generated code contains "
-                f"forbidden dependency: {item}"
-            )
-
-    if "class GeneratedScene(Scene)" not in code:
-
-        raise ValueError(
-            "Generated code does not contain "
-            "GeneratedScene."
-        )
-
-    if "from manim import *" not in code:
-
-        raise ValueError(
-            "Generated code does not import Manim."
-        )
-
-
-# ============================================================
-# RENDER MANIM
-# ============================================================
-
-def render_manim_script(
-    script_path: Path,
-    job_id: str,
-) -> Path:
-
-    print(
-        f"Starting Manim render: {job_id}"
-    )
-
-    job_media_dir = (
-        MEDIA_DIR /
-        job_id
-    )
-
-    job_media_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    manim_cmd = [
-        "manim",
-        "-ql",
-        "--disable_caching",
-        "--media_dir",
-        str(job_media_dir),
-        str(script_path),
-        "GeneratedScene",
-    ]
-
-    print(
-        "Running:",
-        " ".join(manim_cmd),
-    )
-
-    process = subprocess.run(
-        manim_cmd,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-
-    print("MANIM STDOUT:")
-    print(process.stdout)
-
-    print("MANIM STDERR:")
-    print(process.stderr)
-
-    if process.returncode != 0:
-
-        raise RuntimeError(
-            "Manim rendering failed.\n\n"
-            + process.stdout
-            + "\n\n"
-            + process.stderr
-        )
-
-    # ========================================================
-    # FIND ONLY THIS JOB'S VIDEO
-    # ========================================================
-
-    video_files = list(
-        job_media_dir.rglob(
-            "GeneratedScene.mp4"
-        )
-    )
-
-    if not video_files:
-
-        video_files = list(
-            job_media_dir.rglob("*.mp4")
-        )
-
-    if not video_files:
-
-        raise RuntimeError(
-            "Manim finished successfully but "
-            "no MP4 file was found."
-        )
-
-    source_video = max(
-        video_files,
-        key=lambda p: p.stat().st_mtime,
-    )
-
-    final_video = (
-        OUTPUT_DIR /
-        f"{job_id}.mp4"
-    )
-
-    shutil.copy2(
-        source_video,
-        final_video,
-    )
-
-    print(
-        f"Video created: {final_video}"
-    )
-
-    return final_video
-
-
-# ============================================================
-# ROOT / HEALTH
-# ============================================================
-
-@app.get("/")
-def root():
-
-    return {
-        "status": "online",
-        "service": "Tezla Animator Rendering Engine",
-        "version": APP_VERSION,
-        "renderer": "Manim",
-        "tts": "Edge TTS",
-        "sympy": False,
-        "diagrams": True,
-        "latex_normalization": True,
-    }
-
-
-# ============================================================
-# ENGINE TEST
-# ============================================================
-
-@app.get("/engine-test")
-def engine_test():
-
-    results = {}
-
-    # --------------------------------------------------------
-    # MANIM
-    # --------------------------------------------------------
-
-    try:
-
-        result = subprocess.run(
-            ["manim", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-
-        results["manim"] = {
-            "available": result.returncode == 0,
-            "version": (
-                result.stdout.strip()
-                or result.stderr.strip()
-            ),
-        }
-
-    except Exception as exc:
-
-        results["manim"] = {
-            "available": False,
-            "error": str(exc),
-        }
-
-    # --------------------------------------------------------
-    # EDGE TTS
-    # --------------------------------------------------------
-
-    try:
-
-        import edge_tts
-
-        results["edge_tts"] = {
-            "available": True,
-            "version": getattr(
-                edge_tts,
-                "__version__",
-                "installed",
-            ),
-        }
-
-    except Exception as exc:
-
-        results["edge_tts"] = {
-            "available": False,
-            "error": str(exc),
-        }
-
-    # --------------------------------------------------------
-    # FFPROBE
-    # --------------------------------------------------------
-
-    try:
-
-        result = subprocess.run(
-            ["ffprobe", "-version"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-
-        results["ffprobe"] = {
-            "available": result.returncode == 0,
-            "version": (
-                result.stdout.splitlines()[0]
-                if result.stdout
-                else "installed"
-            ),
-        }
-
-    except Exception as exc:
-
-        results["ffprobe"] = {
-            "available": False,
-            "error": str(exc),
-        }
-
-    return {
-        "status": "ok",
-        "version": APP_VERSION,
-        "results": results,
-    }
-
-
-# ============================================================
-# GENERATE VIDEO
-# ============================================================
-
-@app.post("/generate-video")
-def generate_video(
-    req: RenderRequest,
-):
-
-    job_id = str(uuid.uuid4())
-
-    print("=" * 70)
-    print(f"NEW VIDEO JOB: {job_id}")
-    print("=" * 70)
-
-    print("Prompt:")
-    print(req.prompt)
-
-    print(
-        "Solution steps:",
-        len(req.solution_steps or []),
-    )
-
-    print(
-        "Diagram:",
-        req.diagram_spec,
-    )
-
-    script_path = (
-        BASE_DIR /
-        f"{job_id}.py"
-    )
-
-    provider_used = (
-        "direct-solution-steps"
-    )
-
-    try:
-
-        # ====================================================
-        # LOVABLE SOLUTION STEPS
-        # ====================================================
-
-        if req.solution_steps:
-
-            print(
-                "Using Lovable-provided "
-                "solution steps."
-            )
-
-            code = build_direct_manim_script(
-                prompt=req.prompt,
-                steps=req.solution_steps,
-                job_id=job_id,
-                diagram_spec=req.diagram_spec,
-            )
-
-        # ====================================================
-        # AI FALLBACK
-        # ====================================================
-
-        else:
-
-            print(
-                "No solution steps received."
-            )
-
-            print(
-                "Using AI Manim fallback."
-            )
-
-            code, provider_used = (
-                generate_ai_manim_code(
-                    req.prompt
-                )
-            )
-
-        # ====================================================
-        # VALIDATE
-        # ====================================================
-
-        validate_manim_code(
-            code
-        )
-
-        # ====================================================
-        # LOG GENERATED SCRIPT
-        # ========================================================
-
-        print("GENERATED MANIM SCRIPT:")
-        print("-" * 70)
-        print(code)
-        print("-" * 70)
-
-        # ====================================================
-        # WRITE SCRIPT
-        # ====================================================
-
-        script_path.write_text(
-            code,
-            encoding="utf-8",
-        )
-
-        print(
-            f"Script saved: {script_path}"
-        )
-
-        # ====================================================
-        # RENDER
-        # ====================================================
-
-        final_video = render_manim_script(
-            script_path,
-            job_id,
-        )
-
-        # ====================================================
-        # RESPONSE
-        # ====================================================
-
-        video_url = (
-            f"/videos/{final_video.name}"
-        )
-
-        print(
-            f"VIDEO READY: {video_url}"
-        )
-
-        return {
-            "status": "success",
-            "job_id": job_id,
-            "provider_used": provider_used,
-            "video_url": video_url,
-        }
-
-    except subprocess.TimeoutExpired:
-
-        raise HTTPException(
-            status_code=504,
-            detail=(
-                "Manim rendering timed out "
-                "after 600 seconds."
-            ),
-        )
-
-    except Exception as exc:
-
-        print(
-            f"JOB FAILED: {job_id}"
-        )
-
-        print(
-            f"ERROR: {exc}"
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        )
-
-    finally:
-
-        try:
-
-            if script_path.exists():
-                script_path.unlink()
-
-        except Exception as exc:
-
-            print(
-                "Could not delete temporary "
-                f"script: {exc}"
-            )
-
-
-# ============================================================
-# LOCAL DEVELOPMENT
-# ============================================================
-
-if __name__ == "__main__":
-
-    import uvicorn
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "8000",
-        )
-    )
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-    )
-````
+        base_url="https://openrouter.ai/api/v1", 
+    ) 
+ 
+    response = client.chat.completions.create( 
+        model=model, 
+        messages=[ 
+            { 
+                "role": "system", 
+                "content": SYSTEM_PROMPT, 
+            }, 
+            { 
+                "role": "user", 
+                "content": prompt, 
+            }, 
+        ], 
+        temperature=0.2, 
+    ) 
+ 
+    content = ( 
+        response.choices[0] 
+        .message 
+        .content 
+    ) 
+ 
+    if not content: 
+        raise RuntimeError( 
+            "OpenRouter returned an empty response." 
+        ) 
+ 
+    return clean_code_block( 
+        content 
+    ) 
+ 
+ 
+# ============================================================ 
+# AI FALLBACK 
+# ============================================================ 
+ 
+def generate_ai_manim_code(prompt: str): 
+ 
+    providers = [] 
+ 
+    if os.getenv("GEMINI_API_KEY"): 
+ 
+        providers.append( 
+            ( 
+                "gemini", 
+                lambda: generate_with_gemini( 
+                    prompt 
+                ), 
+            ) 
+        ) 
+ 
+    if os.getenv("GROQ_API_KEY"): 
+ 
+        providers.append( 
+            ( 
+                "groq", 
+                lambda: generate_with_groq( 
+                    prompt 
+                ), 
+            ) 
+        ) 
+ 
+    if os.getenv("OPENROUTER_API_KEY"): 
+ 
+        providers.append( 
+            ( 
+                "openrouter-free", 
+                lambda: generate_with_openrouter( 
+                    prompt, 
+                    "openrouter/free", 
+                ), 
+            ) 
+        ) 
+ 
+        providers.append( 
+            ( 
+                "openrouter-cohere", 
+                lambda: generate_with_openrouter( 
+                    prompt, 
+                    "cohere/north-mini-code:free", 
+                ), 
+            ) 
+        ) 
+ 
+    if not providers: 
+ 
+        raise RuntimeError( 
+            "No AI provider API keys are configured." 
+        ) 
+ 
+    errors = [] 
+ 
+    for provider_name, provider_function in providers: 
+ 
+        try: 
+ 
+            print( 
+                f"Trying AI provider: " 
+                f"{provider_name}" 
+            ) 
+ 
+            code = provider_function() 
+ 
+            if ( 
+                code 
+                and 
+                "GeneratedScene" in code 
+            ): 
+ 
+                return ( 
+                    code, 
+                    provider_name, 
+                ) 
+ 
+            errors.append( 
+                f"{provider_name}: invalid generated code" 
+            ) 
+ 
+        except Exception as exc: 
+ 
+            print( 
+                f"{provider_name} failed: {exc}" 
+            ) 
+ 
+            errors.append( 
+                f"{provider_name}: {exc}" 
+            ) 
+ 
+    raise RuntimeError( 
+        "All AI providers failed:\n" 
+        + "\n".join(errors) 
+    ) 
+ 
+ 
+# ============================================================ 
+# VALIDATE MANIM CODE 
+# ============================================================ 
+ 
+def validate_manim_code(code: str): 
+ 
+    if not code: 
+ 
+        raise ValueError( 
+            "Generated Manim code is empty." 
+        ) 
+ 
+    forbidden = [ 
+        "manim_voiceover", 
+        "VoiceoverScene", 
+        "EdgeTTSService", 
+    ] 
+ 
+    for item in forbidden: 
+ 
+        if item in code: 
+ 
+            raise ValueError( 
+                f"Generated code contains " 
+                f"forbidden dependency: {item}" 
+            ) 
+ 
+    if "class GeneratedScene(Scene)" not in code: 
+ 
+        raise ValueError( 
+            "Generated code does not contain " 
+            "GeneratedScene." 
+        ) 
+ 
+    if "from manim import *" not in code: 
+ 
+        raise ValueError( 
+            "Generated code does not import Manim." 
+        ) 
+ 
+ 
+# ============================================================ 
+# RENDER MANIM 
+# ============================================================ 
+ 
+def render_manim_script( 
+    script_path: Path, 
+    job_id: str, 
+) -> Path: 
+ 
+    print( 
+        f"Starting Manim render: {job_id}" 
+    ) 
+ 
+    job_media_dir = ( 
+        MEDIA_DIR / 
+        job_id 
+    ) 
+ 
+    job_media_dir.mkdir( 
+        parents=True, 
+        exist_ok=True, 
+    ) 
+ 
+    manim_cmd = [ 
+        "manim", 
+        "-ql", 
+        "--disable_caching", 
+        "--media_dir", 
+        str(job_media_dir), 
+        str(script_path), 
+        "GeneratedScene", 
+    ] 
+ 
+    print( 
+        "Running:", 
+        " ".join(manim_cmd), 
+    ) 
+ 
+    process = subprocess.run( 
+        manim_cmd, 
+        capture_output=True, 
+        text=True, 
+        timeout=600, 
+    ) 
+ 
+    print("MANIM STDOUT:") 
+    print(process.stdout) 
+ 
+    print("MANIM STDERR:") 
+    print(process.stderr) 
+ 
+    if process.returncode != 0: 
+ 
+        raise RuntimeError( 
+            "Manim rendering failed.\n\n" 
+            + process.stdout 
+            + "\n\n" 
+            + process.stderr 
+        ) 
+ 
+    # ======================================================== 
+    # FIND ONLY THIS JOB'S VIDEO 
+    # ======================================================== 
+ 
+    video_files = list( 
+        job_media_dir.rglob( 
+            "GeneratedScene.mp4" 
+        ) 
+    ) 
+ 
+    if not video_files: 
+ 
+        video_files = list( 
+            job_media_dir.rglob("*.mp4") 
+        ) 
+ 
+    if not video_files: 
+ 
+        raise RuntimeError( 
+            "Manim finished successfully but " 
+            "no MP4 file was found." 
+        ) 
+ 
+    source_video = max( 
+        video_files, 
+        key=lambda p: p.stat().st_mtime, 
+    ) 
+ 
+    final_video = ( 
+        OUTPUT_DIR / 
+        f"{job_id}.mp4" 
+    ) 
+ 
+    shutil.copy2( 
+        source_video, 
+        final_video, 
+    ) 
+ 
+    print( 
+        f"Video created: {final_video}" 
+    ) 
+ 
+    return final_video 
+ 
+ 
+# ============================================================ 
+# ROOT / HEALTH 
+# ============================================================ 
+ 
+@app.get("/") 
+def root(): 
+ 
+    return { 
+        "status": "online", 
+        "service": "Tezla Animator Rendering Engine", 
+        "version": APP_VERSION, 
+        "renderer": "Manim", 
+        "tts": "Edge TTS", 
+        "sympy": False, 
+        "diagrams": True, 
+        "latex_normalization": True, 
+    } 
+ 
+ 
+# ============================================================ 
+# ENGINE TEST 
+# ============================================================ 
+ 
+@app.get("/engine-test") 
+def engine_test(): 
+ 
+    results = {} 
+ 
+    # -------------------------------------------------------- 
+    # MANIM 
+    # -------------------------------------------------------- 
+ 
+    try: 
+ 
+        result = subprocess.run( 
+            ["manim", "--version"], 
+            capture_output=True, 
+            text=True, 
+            timeout=20, 
+        ) 
+ 
+        results["manim"] = { 
+            "available": result.returncode == 0, 
+            "version": ( 
+                result.stdout.strip() 
+                or result.stderr.strip() 
+            ), 
+        } 
+ 
+    except Exception as exc: 
+ 
+        results["manim"] = { 
+            "available": False, 
+            "error": str(exc), 
+        } 
+ 
+    # -------------------------------------------------------- 
+    # EDGE TTS 
+    # -------------------------------------------------------- 
+ 
+    try: 
+ 
+        import edge_tts 
+ 
+        results["edge_tts"] = { 
+            "available": True, 
+            "version": getattr( 
+                edge_tts, 
+                "__version__", 
+                "installed", 
+            ), 
+        } 
+ 
+    except Exception as exc: 
+ 
+        results["edge_tts"] = { 
+            "available": False, 
+            "error": str(exc), 
+        } 
+ 
+    # -------------------------------------------------------- 
+    # FFPROBE 
+    # -------------------------------------------------------- 
+ 
+    try: 
+ 
+        result = subprocess.run( 
+            ["ffprobe", "-version"], 
+            capture_output=True, 
+            text=True, 
+            timeout=20, 
+        ) 
+ 
+        results["ffprobe"] = { 
+            "available": result.returncode == 0, 
+            "version": ( 
+                result.stdout.splitlines()[0] 
+                if result.stdout 
+                else "installed" 
+            ), 
+        } 
+ 
+    except Exception as exc: 
+ 
+        results["ffprobe"] = { 
+            "available": False, 
+            "error": str(exc), 
+        } 
+ 
+    return { 
+        "status": "ok", 
+        "version": APP_VERSION, 
+        "results": results, 
+    } 
+ 
+ 
+# ============================================================ 
+# GENERATE VIDEO 
+# ============================================================ 
+ 
+@app.post("/generate-video") 
+def generate_video( 
+    req: RenderRequest, 
+): 
+ 
+    job_id = str(uuid.uuid4()) 
+ 
+    print("=" * 70) 
+    print(f"NEW VIDEO JOB: {job_id}") 
+    print("=" * 70) 
+ 
+    print("Prompt:") 
+    print(req.prompt) 
+ 
+    print( 
+        "Solution steps:", 
+        len(req.solution_steps or []), 
+    ) 
+ 
+    print( 
+        "Diagram:", 
+        req.diagram_spec, 
+    ) 
+ 
+    script_path = ( 
+        BASE_DIR / 
+        f"{job_id}.py" 
+    ) 
+ 
+    provider_used = ( 
+        "direct-solution-steps" 
+    ) 
+ 
+    try: 
+ 
+        # ==================================================== 
+        # LOVABLE SOLUTION STEPS 
+        # ==================================================== 
+ 
+        if req.solution_steps: 
+ 
+            print( 
+                "Using Lovable-provided " 
+                "solution steps." 
+            ) 
+ 
+            code = build_direct_manim_script( 
+                prompt=req.prompt, 
+                steps=req.solution_steps, 
+                job_id=job_id, 
+                diagram_spec=req.diagram_spec, 
+            ) 
+ 
+        # ==================================================== 
+        # AI FALLBACK 
+        # ==================================================== 
+ 
+        else: 
+ 
+            print( 
+                "No solution steps received." 
+            ) 
+ 
+            print( 
+                "Using AI Manim fallback." 
+            ) 
+ 
+            code, provider_used = ( 
+                generate_ai_manim_code( 
+                    req.prompt 
+                ) 
+            ) 
+ 
+        # ==================================================== 
+        # VALIDATE 
+        # ==================================================== 
+ 
+        validate_manim_code( 
+            code 
+        ) 
+ 
+        # ==================================================== 
+        # LOG GENERATED SCRIPT 
+        # ======================================================== 
+ 
+        print("GENERATED MANIM SCRIPT:") 
+        print("-" * 70) 
+        print(code) 
+        print("-" * 70) 
+ 
+        # ==================================================== 
+        # WRITE SCRIPT 
+        # ==================================================== 
+ 
+        script_path.write_text( 
+            code, 
+            encoding="utf-8", 
+        ) 
+ 
+        print( 
+            f"Script saved: {script_path}" 
+        ) 
+ 
+        # ==================================================== 
+        # RENDER 
+        # ==================================================== 
+ 
+        final_video = render_manim_script( 
+            script_path, 
+            job_id, 
+        ) 
+ 
+        # ==================================================== 
+        # RESPONSE 
+        # ==================================================== 
+ 
+        video_url = ( 
+            f"/videos/{final_video.name}" 
+        ) 
+ 
+        print( 
+            f"VIDEO READY: {video_url}" 
+        ) 
+ 
+        return { 
+            "status": "success", 
+            "job_id": job_id, 
+            "provider_used": provider_used, 
+            "video_url": video_url, 
+        } 
+ 
+    except subprocess.TimeoutExpired: 
+ 
+        raise HTTPException( 
+            status_code=504, 
+            detail=( 
+                "Manim rendering timed out " 
+                "after 600 seconds." 
+            ), 
+        ) 
+ 
+    except Exception as exc: 
+ 
+        print( 
+            f"JOB FAILED: {job_id}" 
+        ) 
+ 
+        print( 
+            f"ERROR: {exc}" 
+        ) 
+ 
+        raise HTTPException( 
+            status_code=500, 
+            detail=str(exc), 
+        ) 
+ 
+    finally: 
+ 
+        try: 
+ 
+            if script_path.exists(): 
+                script_path.unlink() 
+ 
+        except Exception as exc: 
+ 
+            print( 
+                "Could not delete temporary " 
+                f"script: {exc}" 
+            ) 
+ 
+ 
+# ============================================================ 
+# LOCAL DEVELOPMENT 
+# ============================================================ 
+ 
+if __name__ == "__main__": 
+ 
+    import uvicorn 
+ 
+    port = int( 
+        os.getenv( 
+            "PORT", 
+            "8000", 
+        ) 
+    ) 
+ 
+    uvicorn.run( 
+        app, 
+        host="0.0.0.0", 
+        port=port, 
+    ) 
