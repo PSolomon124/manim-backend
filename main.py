@@ -17,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "6.0.0"
+APP_VERSION = "6.1.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -226,6 +226,16 @@ def clean_latex(text: str) -> str:
         )
 
     text = text.replace("$", "")
+
+    # Lovable/JSON can occasionally turn simple geometry labels into
+    # malformed LaTeX commands such as \\b or \\h.  In TeX those are not the
+    # intended variables and can render strangely.  Restore them to ordinary
+    # italic math variables.
+    text = re.sub(r"\\b(?![A-Za-z])", "b", text)
+    text = re.sub(r"\\h(?![A-Za-z])", "h", text)
+
+    # Keep common area formula variables simple and predictable.
+    text = re.sub(r"(?<![A-Za-z])([bh])(?![A-Za-z])", r"\1", text)
 
     return text.strip()
 
@@ -606,7 +616,7 @@ def add_diagram_setup(
             "",
             "        parallelogram = Polygon(",
             "            p1, p2, p3, p4,",
-            "            color=TEAL,",
+            "            color=TEZLA_CYAN,",
             "            fill_opacity=0.10,",
             "            stroke_width=4,",
             "        )",
@@ -622,27 +632,27 @@ def add_diagram_setup(
             "        height_line = DashedLine(",
             "            p4,",
             "            height_foot,",
-            "            color=RED,",
+            "            color=TEZLA_PINK,",
             "            stroke_width=4,",
             "            dash_length=0.10,",
             "        )",
             "",
             "        diagonal = Line(",
             "            p1, p3,",
-            "            color=YELLOW,",
+            "            color=TEZLA_GOLD,",
             "            stroke_width=5,",
             "        )",
             "",
             "        triangle_one = Polygon(",
             "            p1, p2, p3,",
-            "            color=BLUE,",
+            "            color=TEZLA_PURPLE,",
             "            fill_opacity=0.25,",
             "            stroke_opacity=0,",
             "        )",
             "",
             "        triangle_two = Polygon(",
             "            p1, p3, p4,",
-            "            color=GREEN,",
+            "            color=TEZLA_GREEN,",
             "            fill_opacity=0.25,",
             "            stroke_opacity=0,",
             "        )",
@@ -697,14 +707,14 @@ def add_diagram_setup(
             "",
             "        triangle = Polygon(",
             "            ta, tb, tc,",
-            "            color=TEAL,",
+            "            color=TEZLA_CYAN,",
             "            fill_opacity=0.14,",
             "            stroke_width=4,",
             "        )",
             "",
             "        triangle_base = Line(",
             "            ta, tb,",
-            "            color=YELLOW,",
+            "            color=TEZLA_GOLD,",
             "            stroke_width=6,",
             "        )",
             "",
@@ -713,7 +723,7 @@ def add_diagram_setup(
             "        triangle_height = DashedLine(",
             "            tc,",
             "            triangle_height_foot,",
-            "            color=RED,",
+            "            color=TEZLA_PINK,",
             "            stroke_width=4,",
             "        )",
             "",
@@ -742,7 +752,7 @@ def add_diagram_setup(
             "",
             "        circle = Circle(",
             "            radius=1.8,",
-            "            color=TEAL,",
+            "            color=TEZLA_CYAN,",
             "            fill_opacity=0.12,",
             "            stroke_width=4,",
             "        )",
@@ -754,7 +764,7 @@ def add_diagram_setup(
             "        radius_line = Line(",
             "            circle.get_center(),",
             "            circle.get_right(),",
-            "            color=YELLOW,",
+            "            color=TEZLA_GOLD,",
             "            stroke_width=5,",
             "        )",
             "",
@@ -1176,6 +1186,9 @@ def build_direct_manim_script(
         "        # Tezla Animator visual identity",
         '        TEZLA_CYAN = "#22D3EE"',
         '        TEZLA_GOLD = "#FBBF24"',
+        '        TEZLA_PINK = "#F472B6"',
+        '        TEZLA_GREEN = "#34D399"',
+        '        TEZLA_PURPLE = "#A78BFA"',
         '        TEZLA_PANEL = "#0F1B2D"',
         '        MUTED = "#94A3B8"',
         "",
@@ -1226,6 +1239,14 @@ def build_direct_manim_script(
         "",
         "        equation_anchor = RIGHT * 3.15 + UP * 1.15",
         "        explanation_anchor = RIGHT * 3.15 + DOWN * 1.20",
+        "",
+        "        teaching_panel = RoundedRectangle(",
+        "            width=5.65, height=5.15, corner_radius=0.22,",
+        "            stroke_color=TEZLA_CYAN, stroke_opacity=0.22,",
+        "            fill_color=TEZLA_PANEL, fill_opacity=0.42,",
+        "        )",
+        "        teaching_panel.move_to(RIGHT * 3.15 + DOWN * 0.05)",
+        "        self.play(FadeIn(teaching_panel), run_time=0.35)",
         "",
         "        previous_equation = None",
         "        previous_explanation = None",
@@ -1357,6 +1378,7 @@ def build_direct_manim_script(
                 f"            {python_literal(display_explanation)},",
                 "            font_size=18,",
                 "            line_spacing=0.85,",
+                "            color=MUTED,",
                 "        )",
                 "",
                 "        explanation.scale_to_fit_width(5.0)",
@@ -1501,6 +1523,18 @@ def build_direct_manim_script(
                 "",
             ])
 
+        # State-aware equation color gives the learner a visual cue.
+        if equation_state == "final":
+            lines.extend([
+                "        tex.set_color(TEZLA_GOLD)",
+                "",
+            ])
+        elif equation_state == "introduce":
+            lines.extend([
+                "        tex.set_color(TEZLA_CYAN)",
+                "",
+            ])
+
         if emphasis:
 
             lines.extend([
@@ -1641,7 +1675,7 @@ def build_direct_manim_script(
                 "",
                 "        final_box = SurroundingRectangle(",
                 "            previous_equation,",
-                "            color=YELLOW,",
+                "            color=TEZLA_GOLD,",
                 "            buff=0.25,",
                 "            corner_radius=0.08,",
                 "        )",
@@ -1662,7 +1696,8 @@ def build_direct_manim_script(
                 "        self.play(",
                 "            Create(final_box),",
                 "            FadeIn(final_text),",
-                "            run_time=0.65,",
+                "            previous_equation.animate.scale(1.06),",
+                "            run_time=0.60,",
                 "        )",
                 "",
                 # Short viewing buffer, not 2+ seconds.
