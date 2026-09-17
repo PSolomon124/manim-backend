@@ -17,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "6.2.0"
+APP_VERSION = "6.3.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -507,7 +507,13 @@ def prepare_step_audio(
         )
 
         if not narration:
-            narration = " "
+            audio_data.append({
+                "path": None,
+                "duration": 0.0,
+                "exists": False,
+                "narration": "",
+            })
+            continue
 
         audio_file = (
             voice_dir /
@@ -1580,7 +1586,7 @@ def build_direct_manim_script(
 
             # If TTS failed, leave enough time to read.
             lines.extend([
-                "        self.wait(2.2)",
+                "        self.wait(0.18)",
                 "",
             ])
 
@@ -2014,28 +2020,77 @@ def render_manim_script(
     print(
         "Running:",
         " ".join(manim_cmd),
+        flush=True,
     )
 
-    process = subprocess.run(
+    # Stream Manim output live so Render shows the exact failure/hang point.
+    print("Launching Manim with live output...", flush=True)
+
+    process = subprocess.Popen(
         manim_cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        timeout=600,
+        bufsize=1,
     )
 
-    print("MANIM STDOUT:")
-    print(process.stdout)
+    output_lines = []
 
-    print("MANIM STDERR:")
-    print(process.stderr)
+    try:
+        import time
+        started_at = time.monotonic()
+        last_output_at = started_at
+
+        while True:
+            line = process.stdout.readline() if process.stdout else ""
+
+            if line:
+                clean_line = line.rstrip()
+                output_lines.append(clean_line)
+                print("[MANIM]", clean_line, flush=True)
+                last_output_at = time.monotonic()
+
+            return_code = process.poll()
+            now = time.monotonic()
+
+            if return_code is not None:
+                break
+
+            if now - started_at > 420:
+                print("MANIM WATCHDOG: hard timeout after 420 seconds.", flush=True)
+                process.kill()
+                process.wait(timeout=10)
+                raise RuntimeError(
+                    "Manim exceeded the 420-second render timeout."
+                )
+
+            if now - last_output_at > 120:
+                print(
+                    "MANIM WATCHDOG: no output for 120 seconds; killing stuck render.",
+                    flush=True,
+                )
+                process.kill()
+                process.wait(timeout=10)
+                tail = "\n".join(output_lines[-80:])
+                raise RuntimeError(
+                    "Manim produced no output for 120 seconds. Last output:\n"
+                    + tail
+                )
+
+            if not line:
+                time.sleep(0.15)
+
+    finally:
+        if process.stdout:
+            process.stdout.close()
+
+    manim_output = "\n".join(output_lines)
+    print("Manim return code:", process.returncode, flush=True)
 
     if process.returncode != 0:
-
         raise RuntimeError(
             "Manim rendering failed.\n\n"
-            + process.stdout
-            + "\n\n"
-            + process.stderr
+            + (manim_output or "No Manim output was captured.")
         )
 
     video_files = list(
