@@ -18,7 +18,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "7.1.0"
+APP_VERSION = "7.2.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -74,6 +74,12 @@ class SolutionStep(BaseModel):
     equation_state: Optional[str] = None
     segment_index: Optional[int] = None
     diagram_cues: Optional[List[dict]] = None
+    starting_state: Optional[List[str]] = None
+    ending_state: Optional[List[str]] = None
+    layout_mode: Optional[str] = None
+    retain: Optional[List[str]] = None
+    remove: Optional[List[str]] = None
+    focus: Optional[List[str]] = None
 
 
 class RenderRequest(BaseModel):
@@ -83,6 +89,7 @@ class RenderRequest(BaseModel):
     visual_plan: Optional[dict] = None
     theme: Optional[dict] = None
     version: Optional[int] = None
+    plan_version: Optional[str] = None
 
 
 # ============================================================
@@ -2178,7 +2185,11 @@ def _merge_v7_visual_plan(
     steps: List[SolutionStep],
     visual_plan: Optional[dict],
 ) -> List[dict]:
-    """Merge planner beats into canonical narration steps by segment_index."""
+    """Merge v7/v7.2 planner beats into canonical narration steps.
+
+    v7.2 treats ordered actions as authoritative. diagram_cues remains an alias
+    for backwards compatibility with older Lovable payloads.
+    """
     beats = {}
     if isinstance(visual_plan, dict):
         for beat in visual_plan.get("beats", []) or []:
@@ -2192,21 +2203,46 @@ def _merge_v7_visual_plan(
     for i, step in enumerate(steps):
         seg = step.segment_index if step.segment_index is not None else i
         beat = beats.get(int(seg), {})
-        cues = beat.get("diagram_cues")
-        if not isinstance(cues, list):
-            cues = step.diagram_cues or []
+        actions = beat.get("actions")
+        if not isinstance(actions, list):
+            actions = beat.get("diagram_cues")
+        if not isinstance(actions, list):
+            actions = step.diagram_cues or []
+
+        # Enforce deterministic action order even if the model returned strings.
+        cleaned_actions = []
+        for j, cue in enumerate(actions):
+            if not isinstance(cue, dict):
+                continue
+            c = dict(cue)
+            try:
+                c["order"] = int(c.get("order", j))
+            except Exception:
+                c["order"] = j
+            cleaned_actions.append(c)
+        cleaned_actions.sort(key=lambda c: c.get("order", 0))
+
+        equation_latex = beat.get("equation_latex")
+        if equation_latex is None:
+            equation_latex = step.math_latex or ""
 
         merged.append({
             "step_number": step.step_number,
             "segment_index": int(seg),
-            "math_latex": clean_latex(step.math_latex or ""),
+            "math_latex": clean_latex(str(equation_latex or "")),
+            # Canonical slideshow narration remains the source of speech.
             "explanation": clean_spoken_text(step.explanation or ""),
+            "narration": step.explanation or "",
             "scene": beat.get("scene") or step.scene or "equation",
             "equation_state": beat.get("equation_state") or step.equation_state or "hold",
-            "diagram_cues": cues,
-            "retain": beat.get("retain") or [],
-            "remove": beat.get("remove") or [],
-            "focus": beat.get("focus") or [],
+            "actions": cleaned_actions,
+            "diagram_cues": cleaned_actions,
+            "starting_state": beat.get("starting_state") or step.starting_state or [],
+            "ending_state": beat.get("ending_state") or step.ending_state or [],
+            "layout_mode": beat.get("layout_mode") or step.layout_mode or "split",
+            "retain": beat.get("retain") or step.retain or [],
+            "remove": beat.get("remove") or step.remove or [],
+            "focus": beat.get("focus") or step.focus or [],
             "emphasis": step.emphasis or [],
         })
     return merged
@@ -2331,11 +2367,36 @@ class GeneratedScene(Scene):
                 return safe_math(text, int(params.get("font_size", 28)), color)
             return Text(str(text), font_size=int(params.get("font_size", 24)), color=color)
 
+        def semantic_anchor(cue, obj):
+            # Place annotations semantically relative to a stable object.
+            p = cue.get("params") if isinstance(cue.get("params"), dict) else {{}}
+            layout = cue.get("layout") if isinstance(cue.get("layout"), dict) else {{}}
+            anchor_id = str(cue.get("anchor_to") or layout.get("anchor_to") or p.get("anchor_to") or "")
+            relation = str(cue.get("relation") or p.get("relation") or "above").lower()
+            anchor = objects.get(anchor_id)
+            dirs = {{"above": UP, "below": DOWN, "left": LEFT, "right": RIGHT,
+                    "upper_left": UL, "upper_right": UR, "lower_left": DL, "lower_right": DR}}
+            if anchor is not None:
+                obj.next_to(anchor, dirs.get(relation, UP), buff=float(p.get("buff", .16)))
+                return obj
+            region = str(layout.get("region") or p.get("region") or "center").lower()
+            centers = {{"left": LEFT*3.0+DOWN*.25, "right": RIGHT*3.0+DOWN*.25,
+                       "center": DOWN*.25, "top": UP*1.75, "bottom": DOWN*2.25}}
+            obj.move_to(centers.get(region, diagram_center))
+            off = layout.get("offset") or p.get("offset")
+            if isinstance(off, (list, tuple)) and len(off) >= 2:
+                obj.shift(RIGHT*float(off[0]) + UP*float(off[1]))
+            return obj
+
         def make_object(cue):
             typ = str(cue.get("object_type", "")).lower()
             p = cue.get("params") if isinstance(cue.get("params"), dict) else {{}}
+            # v7.2 allows these semantic fields at cue level.
+            p = dict(p)
+            if cue.get("content_type"): p["content_type"] = cue.get("content_type")
+            if cue.get("content") is not None: p["text"] = cue.get("content")
             color = safe_color(p.get("color"), CYAN)
-            label = cue.get("label") or p.get("text") or ""
+            label = cue.get("content") or cue.get("label") or p.get("text") or ""
             stroke = max(1.0, min(8.0, float(p.get("stroke_width", 3))))
 
             if typ in ("point", "marker", "circuit_node"):
@@ -2344,16 +2405,17 @@ class GeneratedScene(Scene):
                 if label:
                     lab = make_label(label, p, WHITE).scale(0.75).next_to(obj, UP, buff=.10)
                     return VGroup(obj, lab)
+                return obj
 
             if typ in ("line", "ray", "circuit_edge"):
-                a = bounded_point(p.get("start") or [-4,0,0]); b = bounded_point(p.get("end") or [-2,0,0])
-                return Line(a, b, color=color, stroke_width=stroke)
+                a = bounded_point(p.get("start") or [-4,0,0]); bb = bounded_point(p.get("end") or [-2,0,0])
+                return Line(a, bb, color=color, stroke_width=stroke)
 
             if typ in ("arrow", "vector", "force_arrow", "dimension"):
-                a = bounded_point(p.get("start") or [-4,0,0]); b = bounded_point(p.get("end") or [-2,0,0])
-                arr = Arrow(a, b, buff=0, color=color, stroke_width=stroke)
+                a = bounded_point(p.get("start") or [-4,0,0]); bb = bounded_point(p.get("end") or [-2,0,0])
+                arr = Arrow(a, bb, buff=0, color=color, stroke_width=stroke)
                 if label:
-                    lab = make_label(label, p, color).scale(.75).next_to(arr.get_center(), UP, buff=.08)
+                    lab = make_label(label, p, color).scale(.75).next_to(arr, UP, buff=.08)
                     return VGroup(arr, lab)
                 return arr
 
@@ -2378,9 +2440,8 @@ class GeneratedScene(Scene):
                 return Arc(radius=radius, start_angle=sa, angle=ang, color=color).move_arc_center_to(center)
 
             if typ == "angle":
-                a = bounded_point(p.get("a") or [-4,0,0]); v = bounded_point(p.get("vertex") or [-3,0,0]); b = bounded_point(p.get("b") or [-3,1,0])
-                l1 = Line(v, a); l2 = Line(v, b)
-                return Angle(l1, l2, radius=max(.18, min(.8, float(p.get("radius", .4)))), color=color)
+                a = bounded_point(p.get("a") or [-4,0,0]); v = bounded_point(p.get("vertex") or [-3,0,0]); bb = bounded_point(p.get("b") or [-3,1,0])
+                return Angle(Line(v, a), Line(v, bb), radius=max(.18, min(.8, float(p.get("radius", .4)))), color=color)
 
             if typ in ("axes", "grid"):
                 xr = p.get("x_range") or [-4,4,1]; yr = p.get("y_range") or [-3,3,1]
@@ -2393,8 +2454,7 @@ class GeneratedScene(Scene):
                 axes = objects.get(axes_id)
                 if axes is None or not isinstance(axes, Axes):
                     axes = Axes(x_range=[-4,4,1], y_range=[-3,3,1], x_length=5.2, y_length=3.8, tips=False).move_to(diagram_center)
-                    objects[axes_id] = axes
-                    self.add(axes)
+                    objects[axes_id] = axes; self.add(axes)
                 expr = p.get("expression") or p.get("function") or "x"
                 try: fn = safe_expr(expr)
                 except Exception: fn = lambda x: x
@@ -2406,60 +2466,60 @@ class GeneratedScene(Scene):
                 return NumberLine(x_range=xr, length=5.4, include_numbers=True, color=MUTED).move_to(diagram_center)
 
             if typ in ("label", "highlight", "brace"):
-                obj = make_label(label or p.get("text") or "", p, color)
-                obj.move_to(bounded_point(p.get("position") or [-3,0,0]))
-                return obj
+                obj = make_label(label or "", p, color)
+                return semantic_anchor(cue, obj)
 
             if typ == "table":
                 rows = p.get("rows") or [[""]]
                 rows = [[str(x) for x in row] for row in rows[:6] if isinstance(row, list)]
                 if rows:
-                    tab = Table(rows, include_outer_lines=True).scale(.45).move_to(diagram_center)
-                    return tab
-
+                    return Table(rows, include_outer_lines=True).scale(.45).move_to(diagram_center)
             return None
 
-        def animate_cues(cues, beat_duration):
-            animations = []
-            removals = []
-            for cue in cues[:16]:
-                if not isinstance(cue, dict): continue
+        def run_actions(cues, beat_duration):
+            # Execute v7.2 storyboard actions in strict order, not as one cue pile.
+            ordered = [c for c in cues[:24] if isinstance(c, dict)]
+            ordered.sort(key=lambda c: int(c.get("order", 0) or 0))
+            if not ordered: return
+            per = max(.18, min(.75, (beat_duration * .52) / max(1, len(ordered)))) if beat_duration > 0 else .35
+            for cue in ordered:
                 action = str(cue.get("action", "show")).lower()
                 oid = str(cue.get("object_id", "")).strip()[:80]
                 if not oid: continue
+                old = objects.get(oid)
 
-                if action == "hide":
-                    old = objects.get(oid)
+                if action in ("hide", "remove"):
                     if old is not None:
-                        animations.append(FadeOut(old)); removals.append(oid)
+                        self.play(FadeOut(old), run_time=per); objects.pop(oid, None)
                     continue
-
                 if action == "highlight":
-                    old = objects.get(oid)
+                    if old is not None: self.play(Indicate(old, color=GOLD, scale_factor=1.06), run_time=per)
+                    continue
+                if action == "dim":
+                    if old is not None: self.play(old.animate.set_opacity(.28), run_time=per)
+                    continue
+                if action == "move":
                     if old is not None:
-                        animations.append(Indicate(old, color=GOLD, scale_factor=1.06))
+                        target = old.copy(); semantic_anchor(cue, target)
+                        self.play(old.animate.move_to(target.get_center()), run_time=per)
                     continue
 
                 new = make_object(cue)
                 if new is None: continue
-                old = objects.get(oid)
-
                 if action == "transform" and old is not None:
-                    animations.append(ReplacementTransform(old, new))
-                    objects[oid] = new
+                    self.play(ReplacementTransform(old, new), run_time=per); objects[oid] = new
                 elif old is None:
                     objects[oid] = new
-                    animations.append(Create(new) if isinstance(new, (Line, Polygon, Circle, Arc, Axes, NumberLine)) else FadeIn(new))
-                elif action in ("create", "show"):
-                    # Stable ID already exists: retain it rather than duplicating.
-                    pass
-
-            if animations:
-                rt = max(.25, min(1.8, beat_duration * .42 if beat_duration > 0 else .7))
-                self.play(*animations, run_time=rt)
-            for oid in removals:
-                objects.pop(oid, None)
-
+                    if action == "write" or isinstance(new, (Text, MathTex)):
+                        self.play(Write(new), run_time=per)
+                    elif action == "draw" or isinstance(new, (Line, Polygon, Circle, Arc, Axes, NumberLine)):
+                        self.play(Create(new), run_time=per)
+                    else:
+                        self.play(FadeIn(new), run_time=per)
+                elif action in ("create", "draw", "write", "show"):
+                    # Existing stable ID means the storyboard is referring to retained state.
+                    if old.get_opacity() < .95:
+                        self.play(old.animate.set_opacity(1.0), run_time=per)
         for beat in BEATS:
             step_start = self.time
             audio_path = beat.get("audio_path")
@@ -2479,7 +2539,10 @@ class GeneratedScene(Scene):
 
             tex = str(beat.get("math_latex") or "").strip()
             state = str(beat.get("equation_state") or "hold").lower()
-            if tex and state != "hold":
+            if state == "remove" and current_eq is not None:
+                self.play(FadeOut(current_eq), run_time=min(.55, max(.25, audio_duration*.12)))
+                current_eq = None
+            if tex and state not in ("hold", "remove"):
                 new_eq = safe_math(tex, 38, WHITE)
                 # Scale down only; never enlarge a tiny formula.
                 if new_eq.width > 5.25: new_eq.scale_to_fit_width(5.25)
@@ -2493,7 +2556,7 @@ class GeneratedScene(Scene):
                     self.play(TransformMatchingTex(current_eq, new_eq), run_time=min(1.0, max(.3, audio_duration*.22)))
                 current_eq = new_eq
 
-            animate_cues(beat.get("diagram_cues") or [], audio_duration)
+            run_actions(beat.get("actions") or beat.get("diagram_cues") or [], audio_duration)
 
             for oid in beat.get("focus", []) or []:
                 obj = objects.get(str(oid))
@@ -2832,28 +2895,32 @@ def _v7_plan_for_segments(visual_plan: Optional[dict], segment_ids: set) -> Opti
     return out
 
 def _v7_reconstruct_prefix(all_steps: List[SolutionStep], chunk_start: int, visual_plan: Optional[dict]):
-    """Return latest still-live cue for each stable object before this chunk.
-    These are injected as zero-history create/show cues so each Manim subprocess
-    starts with only the state it needs, not the previous chunk's memory.
-    """
+    """Rebuild the exact live v7.2 stage required at a chunk boundary."""
     merged = _merge_v7_visual_plan(all_steps, visual_plan)
+    if chunk_start <= 0 or chunk_start >= len(merged):
+        return []
+
+    desired = {str(x) for x in (merged[chunk_start].get("starting_state") or []) if str(x)}
     live = {}
     for beat in merged[:chunk_start]:
+        # Explicit beat removals.
         for oid in beat.get("remove", []) or []:
             live.pop(str(oid), None)
-        for cue in beat.get("diagram_cues", []) or []:
-            if not isinstance(cue, dict):
-                continue
+        for cue in beat.get("actions", []) or beat.get("diagram_cues", []) or []:
+            if not isinstance(cue, dict): continue
             oid = str(cue.get("object_id") or "").strip()
-            if not oid:
-                continue
+            if not oid: continue
             action = str(cue.get("action") or "create").lower()
-            if action == "hide":
+            if action in ("hide", "remove"):
                 live.pop(oid, None)
-            elif action in ("create", "show", "transform"):
-                c = dict(cue)
-                c["action"] = "show"
+            elif action in ("create", "draw", "write", "show", "transform"):
+                c = dict(cue); c["action"] = "show"; c["order"] = -1000 + len(live)
                 live[oid] = c
+            # highlight/dim/move do not replace the object's semantic definition.
+
+    # starting_state is authoritative in 7.2. Older v7 payloads have no state list.
+    if desired:
+        live = {oid: cue for oid, cue in live.items() if oid in desired}
     return list(live.values())
 
 def build_direct_manim_script_v7_chunk(
@@ -2872,8 +2939,11 @@ def build_direct_manim_script_v7_chunk(
     merged = ast.literal_eval(m.group(1))
     if merged:
         prefix = _v7_reconstruct_prefix(all_steps, chunk_start, visual_plan)
-        existing = {str(c.get("object_id")) for c in (merged[0].get("diagram_cues") or []) if isinstance(c, dict)}
-        merged[0]["diagram_cues"] = [c for c in prefix if str(c.get("object_id")) not in existing] + (merged[0].get("diagram_cues") or [])
+        current_actions = merged[0].get("actions") or merged[0].get("diagram_cues") or []
+        existing = {str(c.get("object_id")) for c in current_actions if isinstance(c, dict)}
+        restored = [c for c in prefix if str(c.get("object_id")) not in existing]
+        merged[0]["actions"] = restored + current_actions
+        merged[0]["diagram_cues"] = merged[0]["actions"]
         if merged[0].get("math_latex") and str(merged[0].get("equation_state") or "hold").lower() == "hold":
             merged[0]["equation_state"] = "show"
     return _re.sub(r"BEATS = .*?\nTHEME =", "BEATS = " + repr(merged) + "\nTHEME =", code, count=1, flags=_re.S)
@@ -2901,7 +2971,7 @@ def concat_video_chunks(chunk_paths: List[Path], job_id: str) -> Path:
 def render_v7_chunked(req: RenderRequest, job_id: str) -> Path:
     steps = list(req.solution_steps or [])
     chunks = _v7_chunk_steps(steps)
-    print(f"V7.1 LOW-MEMORY MODE: {len(steps)} beats -> {len(chunks)} chunks of <= {V7_CHUNK_BEATS}", flush=True)
+    print(f"V7.2 LOW-MEMORY STORYBOARD: {len(steps)} beats -> {len(chunks)} chunks of <= {V7_CHUNK_BEATS}", flush=True)
     rendered = []
     start = 0
     try:
@@ -3017,7 +3087,7 @@ def generate_video(
 
             is_v7 = (req.version or 0) >= 7 or bool(req.visual_plan)
             if is_v7:
-                provider_used = "direct-visual-timeline-v7.1-chunked"
+                provider_used = "direct-visual-storyboard-v7.2-chunked"
                 code = None
             else:
                 code = build_direct_manim_script(
