@@ -17,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "6.3.0"
+APP_VERSION = "6.4.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -696,6 +696,47 @@ def add_diagram_setup(
             "",
         ])
 
+    elif kind == "triangle_angles":
+
+        lines.extend([
+            "",
+            "        # ========================================",
+            "        # TRIANGLE / EXTERIOR-ANGLE DIAGRAM",
+            "        # ========================================",
+            "",
+            "        ga = LEFT * 5.1 + DOWN * 1.35",
+            "        gb = LEFT * 1.45 + DOWN * 1.35",
+            "        gc = LEFT * 3.45 + UP * 1.75",
+            "        gext = LEFT * 0.15 + DOWN * 1.35",
+            "",
+            "        angle_triangle = Polygon(",
+            "            ga, gb, gc,",
+            "            color=TEZLA_CYAN,",
+            "            fill_opacity=0.10,",
+            "            stroke_width=4,",
+            "        )",
+            "        exterior_ray = Line(",
+            "            gb, gext,",
+            "            color=TEZLA_GOLD,",
+            "            stroke_width=5,",
+            "        )",
+            "",
+            "        angle_a = Angle(Line(ga, gb), Line(ga, gc), radius=0.38, color=TEZLA_PURPLE)",
+            "        angle_b = Angle(Line(gb, gc), Line(gb, ga), radius=0.42, color=TEZLA_PINK)",
+            "        angle_c = Angle(Line(gc, ga), Line(gc, gb), radius=0.38, color=TEZLA_GREEN)",
+            "        exterior_arc = Angle(Line(gb, gext), Line(gb, gc), radius=0.62, color=TEZLA_GOLD)",
+            "",
+            "        angle_a_label = MathTex(r'A', font_size=28, color=TEZLA_PURPLE).next_to(angle_a, UP, buff=0.05)",
+            "        angle_b_label = MathTex(r'B', font_size=28, color=TEZLA_PINK).next_to(angle_b, UP, buff=0.05)",
+            "        angle_c_label = MathTex(r'C', font_size=28, color=TEZLA_GREEN).next_to(angle_c, DOWN, buff=0.05)",
+            "        exterior_label = Text('exterior', font_size=22, color=TEZLA_GOLD).next_to(exterior_arc, UP, buff=0.10)",
+            "",
+            "        angle_triangle_created = False",
+            "        interior_angles_visible = False",
+            "        exterior_angle_visible = False",
+            "",
+        ])
+
     elif kind == "triangle":
 
         lines.extend([
@@ -855,6 +896,8 @@ def add_visual_action(
         min(animation_time, 1.6),
         0.35,
     )
+    # Keep each principal diagram event within the narration-derived budget.
+    sync_rt = max(min(animation_time * 0.72, 1.15), 0.28)
 
     if kind == "parallelogram_to_triangles":
 
@@ -1028,6 +1071,53 @@ def add_visual_action(
                 "            diagram_created = True",
             ])
 
+    elif kind == "triangle_angles":
+
+        if action in {"", "show_triangle", "introduce_shape"}:
+            lines.extend([
+                "        if not angle_triangle_created:",
+                "            self.play(Create(angle_triangle), run_time=sync_rt)",
+                "            angle_triangle_created = True",
+            ])
+
+        elif action in {"show_interior_angles", "highlight_angle_sum"}:
+            lines.extend([
+                "        if not angle_triangle_created:",
+                "            self.play(Create(angle_triangle), run_time=max(sync_rt * 0.45, 0.25))",
+                "            angle_triangle_created = True",
+                "        if not interior_angles_visible:",
+                "            self.play(",
+                "                Create(angle_a), Create(angle_b), Create(angle_c),",
+                "                FadeIn(angle_a_label), FadeIn(angle_b_label), FadeIn(angle_c_label),",
+                "                run_time=max(sync_rt * 0.55, 0.30),",
+                "            )",
+                "            interior_angles_visible = True",
+                "        else:",
+                "            self.play(Indicate(VGroup(angle_a, angle_b, angle_c)), run_time=sync_rt)",
+            ])
+
+        elif action in {"show_exterior_angle", "highlight_exterior_angle"}:
+            lines.extend([
+                "        if not angle_triangle_created:",
+                "            self.play(Create(angle_triangle), run_time=max(sync_rt * 0.40, 0.25))",
+                "            angle_triangle_created = True",
+                "        if not exterior_angle_visible:",
+                "            self.play(",
+                "                Create(exterior_ray), Create(exterior_arc), FadeIn(exterior_label),",
+                "                run_time=max(sync_rt * 0.60, 0.30),",
+                "            )",
+                "            exterior_angle_visible = True",
+                "        else:",
+                "            self.play(Indicate(exterior_arc, color=TEZLA_GOLD), run_time=sync_rt)",
+            ])
+
+        else:
+            lines.extend([
+                "        if not angle_triangle_created:",
+                "            self.play(Create(angle_triangle), run_time=sync_rt)",
+                "            angle_triangle_created = True",
+            ])
+
     elif kind == "triangle":
 
         if action in {
@@ -1125,6 +1215,99 @@ def add_visual_action(
         ])
 
 
+
+def infer_diagram_spec(
+    prompt: str,
+    steps: List[SolutionStep],
+    diagram_spec: Optional[dict],
+) -> Optional[dict]:
+    """Infer a deterministic educational diagram when Lovable omitted one."""
+    if diagram_spec and str(diagram_spec.get("kind", "")).strip():
+        return diagram_spec
+
+    corpus = " ".join(
+        [prompt]
+        + [step.explanation or "" for step in steps]
+        + [step.visual_action or "" for step in steps]
+    ).lower()
+
+    if "parallelogram" in corpus:
+        return {"kind": "parallelogram_to_triangles", "params": {}, "animation": {}}
+
+    if any(word in corpus for word in (
+        "exterior angle", "interior angle", "triangle angle",
+        "angles of a triangle", "angle of a triangle",
+    )):
+        return {"kind": "triangle_angles", "params": {}, "animation": {}}
+
+    if "triangle" in corpus:
+        return {"kind": "triangle", "params": {}, "animation": {}}
+
+    if any(word in corpus for word in ("circle", "radius", "diameter", "circumference")):
+        return {"kind": "circle", "params": {}, "animation": {}}
+
+    if any(word in corpus for word in (
+        "coordinate plane", "coordinate", "x-axis", "y-axis",
+        "graph of", "plot the graph", "plot point",
+    )):
+        return {"kind": "coordinate_plane", "params": {}, "animation": {}}
+
+    if any(word in corpus for word in (
+        "number line", "inequality", "interval",
+    )):
+        return {"kind": "number_line", "params": {}, "animation": {}}
+
+    return None
+
+
+def infer_visual_action(
+    step: SolutionStep,
+    diagram_spec: Optional[dict],
+    step_index: int,
+) -> str:
+    """Map the canonical narration to a visual event without rewriting speech."""
+    if step.visual_action:
+        return step.visual_action
+
+    if not diagram_spec:
+        return ""
+
+    kind = str(diagram_spec.get("kind", "")).strip()
+    speech = (step.explanation or "").lower()
+
+    if kind == "triangle_angles":
+        if "exterior" in speech:
+            return "show_exterior_angle"
+        if any(x in speech for x in ("interior", "inside angle", "triangle angle")):
+            return "show_interior_angles"
+        if any(x in speech for x in ("sum", "180", "one hundred and eighty")):
+            return "highlight_angle_sum"
+        return "show_triangle"
+
+    if kind == "parallelogram_to_triangles":
+        if "diagonal" in speech or "two triangle" in speech:
+            return "draw_diagonal"
+        if "height" in speech and "base" in speech:
+            return "show_base_height"
+        if "height" in speech:
+            return "show_height"
+        if "base" in speech:
+            return "show_base"
+        return "show_parallelogram"
+
+    if kind == "triangle":
+        if "height" in speech or "base" in speech:
+            return "show_base_height"
+        return "show_triangle"
+
+    if kind == "circle":
+        if "radius" in speech:
+            return "show_radius"
+        return "show_circle"
+
+    return ""
+
+
 # ============================================================
 # DIRECT TEACHING SCRIPT BUILDER
 # ============================================================
@@ -1135,6 +1318,9 @@ def build_direct_manim_script(
     job_id: str,
     diagram_spec: Optional[dict] = None,
 ) -> str:
+    # Diagram generation is narration-driven. Lovable may send a diagram
+    # explicitly; otherwise infer one from the same canonical explanation.
+    diagram_spec = infer_diagram_spec(prompt, steps, diagram_spec)
     """
     V5 Teaching Timeline Engine.
 
@@ -1287,9 +1473,10 @@ def build_direct_manim_script(
             )
         )
 
-        visual_action = (
-            step.visual_action
-            or ""
+        visual_action = infer_visual_action(
+            step,
+            diagram_spec,
+            i,
         )
 
         scene_type = str(
@@ -1316,7 +1503,7 @@ def build_direct_manim_script(
                 1.6,
                 max(
                     0.7,
-                    narration_duration * 0.30,
+                    narration_duration * 0.24,
                 ),
             )
 
@@ -1364,14 +1551,8 @@ def build_direct_manim_script(
             ])
 
         else:
-
             lines.extend([
-                "        tex = Text(",
-                "            'Continue',",
-                "            font_size=32,",
-                "        )",
-                "",
-                "        tex.move_to(equation_anchor)",
+                "        tex = previous_equation.copy() if 'previous_equation' in locals() else VGroup()",
                 "",
             ])
 
@@ -1449,7 +1630,7 @@ def build_direct_manim_script(
             0.70,
             max(
                 0.30,
-                visual_budget * 0.48,
+                visual_budget * 0.42,
             ),
         )
 
