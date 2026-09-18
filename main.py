@@ -18,7 +18,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "7.2.0"
+APP_VERSION = "7.2.0-diagnostic"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -2999,6 +2999,153 @@ def render_v7_chunked(req: RenderRequest, job_id: str) -> Path:
             except Exception: pass
 
 
+
+def _tezla_v72_payload_diagnostics(req, job_id: str):
+    """Print and save the exact v7.2 teaching payload before Manim touches it."""
+    try:
+        if hasattr(req, "model_dump"):
+            raw = req.model_dump()
+        elif hasattr(req, "dict"):
+            raw = req.dict()
+        else:
+            raw = {}
+
+        dump_path = BASE_DIR / f"{job_id}_incoming_v72.json"
+        dump_path.write_text(
+            json.dumps(raw, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+
+        steps = raw.get("solution_steps") or []
+        plan = raw.get("visual_plan") or {}
+        beats = plan.get("beats") or []
+
+        print("\n" + "=" * 78, flush=True)
+        print("TEZLA V7.2 INCOMING PAYLOAD DIAGNOSTIC", flush=True)
+        print("=" * 78, flush=True)
+        print("job_id:", job_id, flush=True)
+        print("version:", raw.get("version"), flush=True)
+        print("plan_version:", raw.get("plan_version"), flush=True)
+        print("prompt_repr:", repr(raw.get("prompt", ""))[:2000], flush=True)
+        print("solution_step_count:", len(steps), flush=True)
+        print("visual_plan_version:", plan.get("version"), flush=True)
+        print("visual_plan_plan_version:", plan.get("plan_version"), flush=True)
+        print("visual_plan_beat_count:", len(beats), flush=True)
+        print("diagram_spec_present:", bool(raw.get("diagram_spec")), flush=True)
+
+        unique_math = set()
+        total_actions = 0
+        beats_with_actions = 0
+        object_ids = set()
+        object_types = set()
+
+        beat_by_segment = {}
+        for b in beats:
+            if isinstance(b, dict):
+                try:
+                    beat_by_segment[int(b.get("segment_index"))] = b
+                except Exception:
+                    pass
+
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            seg = step.get("segment_index")
+            if seg is None:
+                seg = i
+            try:
+                beat = beat_by_segment.get(int(seg), {})
+            except Exception:
+                beat = {}
+
+            narration = step.get("explanation") or ""
+            math_latex = beat.get("equation_latex")
+            if math_latex is None:
+                math_latex = step.get("math_latex") or ""
+            if str(math_latex).strip():
+                unique_math.add(str(math_latex).strip())
+
+            actions = beat.get("actions")
+            if not isinstance(actions, list):
+                actions = beat.get("diagram_cues")
+            if not isinstance(actions, list):
+                actions = step.get("diagram_cues") or []
+            if actions:
+                beats_with_actions += 1
+            total_actions += len(actions)
+
+            print("\n--- SEGMENT", seg, "---", flush=True)
+            print("narration_repr:", repr(narration)[:2500], flush=True)
+            print("math_latex_repr:", repr(math_latex)[:1200], flush=True)
+            print("scene:", beat.get("scene") or step.get("scene"), flush=True)
+            print("equation_state:", beat.get("equation_state") or step.get("equation_state"), flush=True)
+            print("layout_mode:", beat.get("layout_mode") or step.get("layout_mode"), flush=True)
+            print("starting_state:", beat.get("starting_state") or step.get("starting_state") or [], flush=True)
+            print("retain:", beat.get("retain") or step.get("retain") or [], flush=True)
+            print("remove:", beat.get("remove") or step.get("remove") or [], flush=True)
+            print("focus:", beat.get("focus") or step.get("focus") or [], flush=True)
+            print("ending_state:", beat.get("ending_state") or step.get("ending_state") or [], flush=True)
+            print("action_count:", len(actions), flush=True)
+
+            for j, action in enumerate(actions):
+                if not isinstance(action, dict):
+                    print(f"  action[{j}] INVALID:", repr(action), flush=True)
+                    continue
+                oid = str(action.get("object_id") or "")
+                otype = str(action.get("object_type") or "")
+                if oid:
+                    object_ids.add(oid)
+                if otype:
+                    object_types.add(otype)
+                print(
+                    f"  action[{j}] "
+                    f"order={action.get('order')} "
+                    f"action={action.get('action')} "
+                    f"id={oid!r} type={otype!r} "
+                    f"content={action.get('content')!r} "
+                    f"content_type={action.get('content_type')!r} "
+                    f"anchor_to={action.get('anchor_to')!r} "
+                    f"relation={action.get('relation')!r} "
+                    f"layout={action.get('layout')!r} "
+                    f"params={action.get('params')!r} "
+                    f"purpose={action.get('purpose')!r}",
+                    flush=True,
+                )
+
+        narration_chars = sum(
+            len(str(s.get("explanation") or ""))
+            for s in steps if isinstance(s, dict)
+        )
+        print("\n" + "-" * 78, flush=True)
+        print("PAYLOAD QUALITY SUMMARY", flush=True)
+        print("narration_chars:", narration_chars, flush=True)
+        print("unique_math_count:", len(unique_math), flush=True)
+        print("unique_math:", sorted(unique_math), flush=True)
+        print("total_actions:", total_actions, flush=True)
+        print("beats_with_actions:", beats_with_actions, "/", len(steps), flush=True)
+        print("unique_object_ids:", len(object_ids), sorted(object_ids), flush=True)
+        print("object_types:", sorted(object_types), flush=True)
+
+        suspicious = []
+        if narration_chars >= 300 and total_actions < 3:
+            suspicious.append("LONG_NARRATION_WITH_TOO_FEW_VISUAL_ACTIONS")
+        if len(steps) >= 4 and beats_with_actions <= 1:
+            suspicious.append("MOST_BEATS_HAVE_NO_ACTIONS")
+        if len(unique_math) <= 1 and len(steps) >= 5:
+            suspicious.append("MATH_ALIGNMENT_COLLAPSED_OR_REPEATED")
+        prompt = str(raw.get("prompt") or "").strip()
+        if len(prompt) < 12:
+            suspicious.append("PROMPT_LOOKS_TRUNCATED_OR_IS_A_FRAGMENT")
+
+        print("suspicious_flags:", suspicious or ["none"], flush=True)
+        print("payload_saved_to:", dump_path, flush=True)
+        print("=" * 78 + "\n", flush=True)
+        return dump_path
+    except Exception as exc:
+        print("PAYLOAD DIAGNOSTIC FAILED:", repr(exc), flush=True)
+        return None
+
+
 # ============================================================
 # GENERATE VIDEO
 # ============================================================
@@ -3032,6 +3179,10 @@ def generate_video(
         "Diagram:",
         req.diagram_spec,
     )
+
+    # v7.2 diagnostic: capture the exact Lovable payload before any
+    # cleaning, merging, chunking, MathTex handling, or Manim rendering.
+    _tezla_v72_payload_diagnostics(req, job_id)
 
     if req.solution_steps:
 
