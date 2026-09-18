@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import asyncio
+import ast
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,7 +18,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "7.0.0"
+APP_VERSION = "7.1.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -2809,6 +2810,125 @@ def tts_test():
             pass
 
 
+
+
+# ============================================================
+# V7.1 LOW-MEMORY CHUNKED RENDERING
+# ============================================================
+
+V7_CHUNK_BEATS = max(1, int(os.getenv("TEZLA_MANIM_CHUNK_BEATS", "3")))
+
+def _v7_chunk_steps(steps: List[SolutionStep], chunk_size: int = V7_CHUNK_BEATS):
+    return [steps[i:i + chunk_size] for i in range(0, len(steps), chunk_size)]
+
+def _v7_plan_for_segments(visual_plan: Optional[dict], segment_ids: set) -> Optional[dict]:
+    if not isinstance(visual_plan, dict):
+        return visual_plan
+    out = dict(visual_plan)
+    out["beats"] = [
+        b for b in (visual_plan.get("beats") or [])
+        if isinstance(b, dict) and b.get("segment_index") in segment_ids
+    ]
+    return out
+
+def _v7_reconstruct_prefix(all_steps: List[SolutionStep], chunk_start: int, visual_plan: Optional[dict]):
+    """Return latest still-live cue for each stable object before this chunk.
+    These are injected as zero-history create/show cues so each Manim subprocess
+    starts with only the state it needs, not the previous chunk's memory.
+    """
+    merged = _merge_v7_visual_plan(all_steps, visual_plan)
+    live = {}
+    for beat in merged[:chunk_start]:
+        for oid in beat.get("remove", []) or []:
+            live.pop(str(oid), None)
+        for cue in beat.get("diagram_cues", []) or []:
+            if not isinstance(cue, dict):
+                continue
+            oid = str(cue.get("object_id") or "").strip()
+            if not oid:
+                continue
+            action = str(cue.get("action") or "create").lower()
+            if action == "hide":
+                live.pop(oid, None)
+            elif action in ("create", "show", "transform"):
+                c = dict(cue)
+                c["action"] = "show"
+                live[oid] = c
+    return list(live.values())
+
+def build_direct_manim_script_v7_chunk(
+    prompt: str, all_steps: List[SolutionStep], chunk_steps: List[SolutionStep],
+    chunk_start: int, job_id: str, visual_plan: Optional[dict] = None,
+    theme: Optional[dict] = None,
+) -> str:
+    segs = {int(st.segment_index if st.segment_index is not None else (chunk_start+i)) for i,st in enumerate(chunk_steps)}
+    plan = _v7_plan_for_segments(visual_plan, segs)
+    # The canonical builder generates this chunk's TTS exactly once.
+    code = build_direct_manim_script_v7(prompt, chunk_steps, job_id, plan, theme)
+    import re as _re
+    m = _re.search(r"BEATS = (.*?)\nTHEME =", code, flags=_re.S)
+    if not m:
+        raise RuntimeError("Could not locate v7 beat payload in generated chunk script.")
+    merged = ast.literal_eval(m.group(1))
+    if merged:
+        prefix = _v7_reconstruct_prefix(all_steps, chunk_start, visual_plan)
+        existing = {str(c.get("object_id")) for c in (merged[0].get("diagram_cues") or []) if isinstance(c, dict)}
+        merged[0]["diagram_cues"] = [c for c in prefix if str(c.get("object_id")) not in existing] + (merged[0].get("diagram_cues") or [])
+        if merged[0].get("math_latex") and str(merged[0].get("equation_state") or "hold").lower() == "hold":
+            merged[0]["equation_state"] = "show"
+    return _re.sub(r"BEATS = .*?\nTHEME =", "BEATS = " + repr(merged) + "\nTHEME =", code, count=1, flags=_re.S)
+
+def concat_video_chunks(chunk_paths: List[Path], job_id: str) -> Path:
+    if not chunk_paths:
+        raise RuntimeError("No rendered chunks to concatenate.")
+    if len(chunk_paths) == 1:
+        final_video = OUTPUT_DIR / f"{job_id}.mp4"
+        shutil.copy2(chunk_paths[0], final_video)
+        return final_video
+    concat_file = BASE_DIR / f"{job_id}_concat.txt"
+    def esc(path: Path):
+        return str(path.resolve()).replace("'", "'\\''")
+    concat_file.write_text("".join(f"file '{esc(p)}'\n" for p in chunk_paths), encoding="utf-8")
+    final_video = OUTPUT_DIR / f"{job_id}.mp4"
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(final_video)]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try: concat_file.unlink(missing_ok=True)
+    except Exception: pass
+    if result.returncode != 0 or not final_video.exists():
+        raise RuntimeError("FFmpeg chunk concatenation failed.\n" + result.stdout[-5000:])
+    return final_video
+
+def render_v7_chunked(req: RenderRequest, job_id: str) -> Path:
+    steps = list(req.solution_steps or [])
+    chunks = _v7_chunk_steps(steps)
+    print(f"V7.1 LOW-MEMORY MODE: {len(steps)} beats -> {len(chunks)} chunks of <= {V7_CHUNK_BEATS}", flush=True)
+    rendered = []
+    start = 0
+    try:
+        for ci, chunk in enumerate(chunks, start=1):
+            chunk_job = f"{job_id}_c{ci:02d}"
+            script = BASE_DIR / f"{chunk_job}.py"
+            print(f"Rendering chunk {ci}/{len(chunks)}: beats {start}..{start+len(chunk)-1}", flush=True)
+            code = build_direct_manim_script_v7_chunk(req.prompt, steps, chunk, start, chunk_job, req.visual_plan, req.theme)
+            validate_manim_code(code)
+            script.write_text(code, encoding="utf-8")
+            rendered.append(render_manim_script(script, chunk_job))
+            try: script.unlink(missing_ok=True)
+            except Exception: pass
+            # Delete Manim media for the completed subprocess before starting another.
+            try: shutil.rmtree(MEDIA_DIR / chunk_job, ignore_errors=True)
+            except Exception: pass
+            import gc
+            gc.collect()
+            start += len(chunk)
+        return concat_video_chunks(rendered, job_id)
+    finally:
+        # Voice files are job/chunk-local and can be reclaimed after final assembly.
+        for ci in range(1, len(chunks)+1):
+            try: shutil.rmtree(VOICE_DIR / f"{job_id}_c{ci:02d}", ignore_errors=True)
+            except Exception: pass
+
+
 # ============================================================
 # GENERATE VIDEO
 # ============================================================
@@ -2895,15 +3015,10 @@ def generate_video(
                 "teaching steps."
             )
 
-            if (req.version or 0) >= 7 or req.visual_plan:
-                provider_used = "direct-visual-timeline-v7"
-                code = build_direct_manim_script_v7(
-                    prompt=req.prompt,
-                    steps=req.solution_steps,
-                    job_id=job_id,
-                    visual_plan=req.visual_plan,
-                    theme=req.theme,
-                )
+            is_v7 = (req.version or 0) >= 7 or bool(req.visual_plan)
+            if is_v7:
+                provider_used = "direct-visual-timeline-v7.1-chunked"
+                code = None
             else:
                 code = build_direct_manim_script(
                     prompt=req.prompt,
@@ -2937,45 +3052,19 @@ def generate_video(
         # VALIDATE
         # ====================================================
 
-        validate_manim_code(
-            code
-        )
-
-        # ====================================================
-        # LOG SCRIPT
-        # ====================================================
-
-        print(
-            "GENERATED MANIM SCRIPT:"
-        )
-
-        print("-" * 70)
-        print(code)
-        print("-" * 70)
-
-        # ====================================================
-        # WRITE SCRIPT
-        # ====================================================
-
-        script_path.write_text(
-            code,
-            encoding="utf-8",
-        )
-
-        print(
-            f"Script saved: {script_path}"
-        )
-
-        # ====================================================
-        # RENDER
-        # ====================================================
-
-        final_video = (
-            render_manim_script(
-                script_path,
-                job_id,
-            )
-        )
+        if req.solution_steps and ((req.version or 0) >= 7 or req.visual_plan):
+            # Free-tier-safe path: each Manim subprocess renders only a few beats,
+            # exits completely, then FFmpeg joins the chunks without re-encoding.
+            final_video = render_v7_chunked(req, job_id)
+        else:
+            validate_manim_code(code)
+            print("GENERATED MANIM SCRIPT:")
+            print("-" * 70)
+            print(code)
+            print("-" * 70)
+            script_path.write_text(code, encoding="utf-8")
+            print(f"Script saved: {script_path}")
+            final_video = render_manim_script(script_path, job_id)
 
         # ====================================================
         # RESPONSE
