@@ -17,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "6.4.1"
+APP_VERSION = "7.0.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -73,12 +73,17 @@ class SolutionStep(BaseModel):
     emphasis: Optional[List[str]] = None
     scene: Optional[str] = None
     equation_state: Optional[str] = None
+    segment_index: Optional[int] = None
+    diagram_cues: Optional[List[dict]] = None
 
 
 class RenderRequest(BaseModel):
     prompt: str
     solution_steps: Optional[List[SolutionStep]] = None
     diagram_spec: Optional[dict] = None
+    visual_plan: Optional[dict] = None
+    theme: Optional[dict] = None
+    version: Optional[int] = None
 
 
 # ============================================================
@@ -1312,6 +1317,207 @@ def infer_visual_action(
 # DIRECT TEACHING SCRIPT BUILDER
 # ============================================================
 
+
+def _v7_plan_map(visual_plan: Optional[dict]) -> dict:
+    out = {}
+    if isinstance(visual_plan, dict):
+        for beat in visual_plan.get("beats", []) or []:
+            if isinstance(beat, dict):
+                try:
+                    out[int(beat.get("segment_index"))] = beat
+                except Exception:
+                    pass
+    return out
+
+
+def build_direct_manim_script_v7(
+    prompt: str,
+    steps: List[SolutionStep],
+    job_id: str,
+    diagram_spec: Optional[dict] = None,
+    visual_plan: Optional[dict] = None,
+    theme: Optional[dict] = None,
+) -> str:
+    """Generic declarative v7 renderer. Narration is the master clock."""
+    import json
+    audio = prepare_step_audio(steps, job_id)
+    plan = _v7_plan_map(visual_plan)
+    beats = []
+    for i, step in enumerate(steps):
+        seg = int(step.segment_index if step.segment_index is not None else i)
+        pb = plan.get(seg, {})
+        cues = pb.get("diagram_cues", []) if pb.get("diagram_useful") else []
+        if not cues:
+            cues = step.diagram_cues or []
+        beats.append({
+            "segment_index": seg,
+            "math_latex": clean_latex(step.math_latex or ""),
+            "equation_state": str(step.equation_state or "hold"),
+            "scene": str(pb.get("scene") or step.scene or "equation"),
+            "diagram_cues": cues[:12] if isinstance(cues, list) else [],
+            "audio_path": str(audio[i]["path"]) if audio[i]["exists"] else "",
+            "audio_duration": float(audio[i]["duration"] or 0.0),
+        })
+
+    has_visuals = any(x["diagram_cues"] for x in beats)
+    title = clean_title(prompt)
+    title = re.sub(r"\$\$.*?\$\$|\$.*?\$", "", title)
+    title = re.sub(r"\\[A-Za-z]+(?:\{[^{}]*\})?", "", title)
+    title = re.sub(r"[{}_^\\\\]+", " ", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    if not title or "=" in title:
+        title = "Interactive Mathematics"
+    title = title[:52]
+
+    data = json.dumps(beats, ensure_ascii=False)
+    return """from manim import *
+import numpy as np
+import math, ast
+
+BEATS = %s
+
+class GeneratedScene(Scene):
+    def construct(self):
+        self.camera.background_color = "#07111f"
+        CYAN="#22D3EE"; GOLD="#FBBF24"; PINK="#F472B6"; GREEN="#34D399"
+        PURPLE="#A78BFA"; PANEL="#0F1B2D"; MUTED="#94A3B8"
+
+        brand=Text("TEZLA ANIMATOR",font_size=18,weight=BOLD,color=CYAN).to_corner(UL,buff=0.25)
+        title=Text(%r,font_size=25,weight=BOLD).to_edge(UP,buff=0.25)
+        if title.width>9.7: title.scale_to_fit_width(9.7)
+        divider=Line(LEFT*6.4,RIGHT*6.4,color=CYAN,stroke_opacity=0.28).next_to(title,DOWN,buff=0.14)
+        self.add(brand,title,divider)
+
+        HAS_VISUALS=%r
+        if HAS_VISUALS:
+            self.add(RoundedRectangle(width=6.0,height=5.2,corner_radius=.22,stroke_color=CYAN,stroke_opacity=.18,fill_color=PANEL,fill_opacity=.22).move_to(LEFT*3.15+DOWN*.18))
+            self.add(RoundedRectangle(width=5.75,height=5.2,corner_radius=.22,stroke_color=CYAN,stroke_opacity=.18,fill_color=PANEL,fill_opacity=.28).move_to(RIGHT*3.15+DOWN*.18))
+            eq_anchor=RIGHT*3.15+UP*.25; eq_max=5.0; vc=LEFT*3.15+DOWN*.15
+        else:
+            self.add(RoundedRectangle(width=11.8,height=5.2,corner_radius=.22,stroke_color=CYAN,stroke_opacity=.18,fill_color=PANEL,fill_opacity=.28).move_to(DOWN*.18))
+            eq_anchor=DOWN*.05; eq_max=10.8; vc=LEFT*3.15+DOWN*.15
+
+        objects={}
+        previous_equation=None
+
+        def pt(v, default=(0,0)):
+            try: return vc+np.array([float(v[0])*.62,float(v[1])*.62,0.0])
+            except Exception: return vc+np.array([float(default[0])*.62,float(default[1])*.62,0.0])
+
+        def num(v,d):
+            try: return float(v)
+            except Exception: return float(d)
+
+        def with_label(m,c):
+            lab=str(c.get("label") or "").strip()
+            if not lab: return m
+            x=Text(lab[:28],font_size=19,color=GOLD)
+            try: x.next_to(m,UP,buff=.08)
+            except Exception: x.move_to(m.get_center()+UP*.25)
+            return VGroup(m,x)
+
+        def safe_fn(expr):
+            names={"pi":math.pi,"e":math.e,"sin":math.sin,"cos":math.cos,"tan":math.tan,"sqrt":math.sqrt,"exp":math.exp,"log":math.log,"abs":abs}
+            nodes=(ast.Expression,ast.BinOp,ast.UnaryOp,ast.Call,ast.Name,ast.Load,ast.Constant,ast.Add,ast.Sub,ast.Mult,ast.Div,ast.Pow,ast.USub,ast.UAdd,ast.Mod)
+            try:
+                tree=ast.parse(str(expr).replace("^","**"),mode="eval")
+                for n in ast.walk(tree):
+                    if not isinstance(n,nodes): raise ValueError()
+                    if isinstance(n,ast.Name) and n.id!="x" and n.id not in names: raise ValueError()
+                    if isinstance(n,ast.Call) and (not isinstance(n.func,ast.Name) or n.func.id not in names): raise ValueError()
+                code=compile(tree,"<graph>","eval")
+                return lambda x: float(eval(code,{"__builtins__":{}},{**names,"x":x}))
+            except Exception: return None
+
+        def make(c):
+            typ=str(c.get("object_type") or "").lower(); p=c.get("params") or {}
+            if typ=="point": m=Dot(pt(p.get("point") or p.get("position") or [0,0]),radius=.07,color=GOLD)
+            elif typ in ("line","circuit_edge"): m=Line(pt(p.get("start") or p.get("from") or [0,0]),pt(p.get("end") or p.get("to") or [2,0]),color=CYAN,stroke_width=4)
+            elif typ in ("ray","arrow","vector","force_arrow"): m=Arrow(pt(p.get("start") or p.get("from") or [0,0]),pt(p.get("end") or p.get("to") or [2,0]),buff=0,color=GOLD if typ in ("vector","force_arrow") else CYAN,stroke_width=4)
+            elif typ=="polygon":
+                q=p.get("points") or [[-2,-1],[2,-1],[0,1.6]]
+                m=Polygon(*[pt(z) for z in q[:10]],color=CYAN,stroke_width=4,fill_color=PURPLE,fill_opacity=.10)
+            elif typ=="circle": m=Circle(radius=max(.2,min(2.3,num(p.get("radius"),1.3)*.62)),color=CYAN,stroke_width=4).move_to(pt(p.get("center") or [0,0]))
+            elif typ in ("arc","angle"):
+                m=Arc(radius=max(.18,min(1.3,num(p.get("radius"),.65)*.62)),start_angle=math.radians(num(p.get("start_angle"),0)),angle=math.radians(num(p.get("angle") or p.get("degrees"),60)),arc_center=pt(p.get("center") or p.get("vertex") or [0,0]),color=GOLD,stroke_width=5)
+            elif typ=="axes": m=Axes(x_range=(p.get("x_range") or [-5,5,1])[:3],y_range=(p.get("y_range") or [-3,3,1])[:3],x_length=5,y_length=3.6,tips=False).move_to(vc)
+            elif typ in ("graph","function"):
+                ax=next((o for o in objects.values() if isinstance(o,Axes)),None)
+                if ax is None:
+                    ax=Axes(x_range=[-5,5,1],y_range=[-3,3,1],x_length=5,y_length=3.6,tips=False).move_to(vc); objects["_axes"]=ax; self.add(ax)
+                fn=safe_fn(p.get("expression") or p.get("function") or "x")
+                m=ax.plot(fn or (lambda x:x),x_range=[-4.5,4.5],color=PINK,stroke_width=4)
+            elif typ in ("brace","dimension"):
+                base=Line(pt(p.get("start") or [-1,0]),pt(p.get("end") or [1,0]),color=MUTED); m=VGroup(base,Brace(base,direction=DOWN,color=GOLD))
+            elif typ=="label": m=Text(str(c.get("label") or p.get("text") or "")[:40],font_size=21,color=GOLD).move_to(pt(p.get("position") or [0,0]))
+            elif typ in ("marker","circuit_node"): m=Dot(pt(p.get("point") or p.get("position") or [0,0]),radius=.09,color=GOLD)
+            elif typ in ("region","highlight"):
+                q=p.get("points")
+                if isinstance(q,list) and len(q)>=3: m=Polygon(*[pt(z) for z in q[:10]],color=GOLD,fill_color=GOLD,fill_opacity=.18)
+                else: m=RoundedRectangle(width=max(.4,min(4.8,num(p.get("width"),2)*.62)),height=max(.3,min(3.8,num(p.get("height"),1)*.62)),corner_radius=.12,color=GOLD,fill_color=GOLD,fill_opacity=.12).move_to(pt(p.get("center") or [0,0]))
+            elif typ=="number_line": m=NumberLine(x_range=[num(p.get("min"),-5),num(p.get("max"),5),num(p.get("step"),1)],length=5,include_numbers=True,font_size=18).move_to(vc)
+            elif typ=="grid": m=NumberPlane(x_range=[0,int(num(p.get("cols"),4)),1],y_range=[0,int(num(p.get("rows"),4)),1],x_length=5,y_length=3.6).move_to(vc)
+            elif typ=="table":
+                d=p.get("data") or [["",""],["",""]]; d=[[str(v)[:14] for v in r[:5]] for r in d[:6] if isinstance(r,list)] or [["",""]]
+                m=Table(d,include_outer_lines=True); 
+                if m.width>5: m.scale_to_fit_width(5)
+                if m.height>3.8: m.scale_to_fit_height(3.8)
+                m.move_to(vc)
+            else: return None
+            return m if typ in ("label","table","axes","graph","function") else with_label(m,c)
+
+        def cue_anims(cues):
+            a=[]
+            for c in cues:
+                if not isinstance(c,dict): continue
+                act=str(c.get("action") or "create").lower(); oid=str(c.get("object_id") or "")[:48]
+                if not oid: continue
+                if act in ("create","show"):
+                    if oid in objects: a.append(Indicate(objects[oid],color=GOLD)); continue
+                    m=make(c)
+                    if m is not None: objects[oid]=m; a.append(Create(m) if act=="create" else FadeIn(m))
+                elif act=="highlight" and oid in objects: a.append(Indicate(objects[oid],color=GOLD,scale_factor=1.05))
+                elif act=="hide" and oid in objects: a.append(FadeOut(objects.pop(oid)))
+                elif act=="transform":
+                    old=objects.get(oid); new=make(c)
+                    if new is not None:
+                        objects[oid]=new; a.append(ReplacementTransform(old,new) if old is not None else Create(new))
+            return a
+
+        for bi,beat in enumerate(BEATS):
+            dur=float(beat.get("audio_duration") or 0); audio=str(beat.get("audio_path") or "")
+            latex=str(beat.get("math_latex") or "").strip(); state=str(beat.get("equation_state") or "hold").lower()
+            start=self.time
+            if audio: self.add_sound(audio)
+            anims=[]
+            if latex:
+                try:
+                    tex=MathTex(latex,font_size=42)
+                    tex.set_color(GOLD if state=="final" else CYAN if state=="introduce" else WHITE)
+                    if tex.width>eq_max: tex.scale_to_fit_width(eq_max)
+                    if tex.height>2.5: tex.scale_to_fit_height(2.5)
+                    tex.move_to(eq_anchor)
+                    if previous_equation is None:
+                        previous_equation=tex; anims.append(Write(tex))
+                    elif state=="hold":
+                        try: same=tex.get_tex_string()==previous_equation.get_tex_string()
+                        except Exception: same=False
+                        if not same: anims.append(ReplacementTransform(previous_equation,tex)); previous_equation=tex
+                    else:
+                        anims.append(ReplacementTransform(previous_equation,tex)); previous_equation=tex
+                except Exception: pass
+            anims.extend(cue_anims(beat.get("diagram_cues") or []))
+            if anims:
+                self.play(*anims,run_time=min(1.2,max(.28,dur*.42 if dur>0 else .55)))
+            elapsed=self.time-start
+            if dur>elapsed: self.wait(dur-elapsed)
+            if bi<len(BEATS)-1: self.wait(.06)
+
+        if previous_equation is not None: self.play(Indicate(previous_equation,color=GOLD,scale_factor=1.04),run_time=.35)
+        self.wait(.15)
+""" % (data, title, bool(has_visuals))
+
+
 def build_direct_manim_script(
     prompt: str,
     steps: List[SolutionStep],
@@ -2222,8 +2428,16 @@ def render_manim_script(
         started_at = time.monotonic()
         last_output_at = started_at
 
+        import selectors
+        selector = selectors.DefaultSelector()
+        if process.stdout:
+            selector.register(process.stdout, selectors.EVENT_READ)
+
         while True:
-            line = process.stdout.readline() if process.stdout else ""
+            line = ""
+            events = selector.select(timeout=0.20)
+            if events and process.stdout:
+                line = process.stdout.readline()
 
             if line:
                 clean_line = line.rstrip()
@@ -2604,7 +2818,7 @@ def generate_video(
     )
 
     provider_used = (
-        "direct-solution-steps-v6"
+        "direct-solution-steps-v7-compatible"
     )
 
     try:
@@ -2620,14 +2834,23 @@ def generate_video(
                 "teaching steps."
             )
 
-            code = (
-                build_direct_manim_script(
+            if int(req.version or 0) >= 7 or req.visual_plan:
+                provider_used = "direct-visual-timeline-v7"
+                code = build_direct_manim_script_v7(
+                    prompt=req.prompt,
+                    steps=req.solution_steps,
+                    job_id=job_id,
+                    diagram_spec=req.diagram_spec,
+                    visual_plan=req.visual_plan,
+                    theme=req.theme,
+                )
+            else:
+                code = build_direct_manim_script(
                     prompt=req.prompt,
                     steps=req.solution_steps,
                     job_id=job_id,
                     diagram_spec=req.diagram_spec,
                 )
-            )
 
         # ====================================================
         # AI FALLBACK
