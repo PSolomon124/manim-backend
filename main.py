@@ -65,10 +65,8 @@ app.mount(
 
 class SolutionStep(BaseModel):
     step_number: int
-    math_latex: str
-    explanation: str
-
-    # Visual planning metadata from Lovable.
+    math_latex: str = ""
+    explanation: str = ""
     visual_action: Optional[str] = None
     emphasis: Optional[List[str]] = None
     scene: Optional[str] = None
@@ -1317,207 +1315,6 @@ def infer_visual_action(
 # DIRECT TEACHING SCRIPT BUILDER
 # ============================================================
 
-
-def _v7_plan_map(visual_plan: Optional[dict]) -> dict:
-    out = {}
-    if isinstance(visual_plan, dict):
-        for beat in visual_plan.get("beats", []) or []:
-            if isinstance(beat, dict):
-                try:
-                    out[int(beat.get("segment_index"))] = beat
-                except Exception:
-                    pass
-    return out
-
-
-def build_direct_manim_script_v7(
-    prompt: str,
-    steps: List[SolutionStep],
-    job_id: str,
-    diagram_spec: Optional[dict] = None,
-    visual_plan: Optional[dict] = None,
-    theme: Optional[dict] = None,
-) -> str:
-    """Generic declarative v7 renderer. Narration is the master clock."""
-    import json
-    audio = prepare_step_audio(steps, job_id)
-    plan = _v7_plan_map(visual_plan)
-    beats = []
-    for i, step in enumerate(steps):
-        seg = int(step.segment_index if step.segment_index is not None else i)
-        pb = plan.get(seg, {})
-        cues = pb.get("diagram_cues", []) if pb.get("diagram_useful") else []
-        if not cues:
-            cues = step.diagram_cues or []
-        beats.append({
-            "segment_index": seg,
-            "math_latex": clean_latex(step.math_latex or ""),
-            "equation_state": str(step.equation_state or "hold"),
-            "scene": str(pb.get("scene") or step.scene or "equation"),
-            "diagram_cues": cues[:12] if isinstance(cues, list) else [],
-            "audio_path": str(audio[i]["path"]) if audio[i]["exists"] else "",
-            "audio_duration": float(audio[i]["duration"] or 0.0),
-        })
-
-    has_visuals = any(x["diagram_cues"] for x in beats)
-    title = clean_title(prompt)
-    title = re.sub(r"\$\$.*?\$\$|\$.*?\$", "", title)
-    title = re.sub(r"\\[A-Za-z]+(?:\{[^{}]*\})?", "", title)
-    title = re.sub(r"[{}_^\\\\]+", " ", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    if not title or "=" in title:
-        title = "Interactive Mathematics"
-    title = title[:52]
-
-    data = json.dumps(beats, ensure_ascii=False)
-    return """from manim import *
-import numpy as np
-import math, ast
-
-BEATS = %s
-
-class GeneratedScene(Scene):
-    def construct(self):
-        self.camera.background_color = "#07111f"
-        CYAN="#22D3EE"; GOLD="#FBBF24"; PINK="#F472B6"; GREEN="#34D399"
-        PURPLE="#A78BFA"; PANEL="#0F1B2D"; MUTED="#94A3B8"
-
-        brand=Text("TEZLA ANIMATOR",font_size=18,weight=BOLD,color=CYAN).to_corner(UL,buff=0.25)
-        title=Text(%r,font_size=25,weight=BOLD).to_edge(UP,buff=0.25)
-        if title.width>9.7: title.scale_to_fit_width(9.7)
-        divider=Line(LEFT*6.4,RIGHT*6.4,color=CYAN,stroke_opacity=0.28).next_to(title,DOWN,buff=0.14)
-        self.add(brand,title,divider)
-
-        HAS_VISUALS=%r
-        if HAS_VISUALS:
-            self.add(RoundedRectangle(width=6.0,height=5.2,corner_radius=.22,stroke_color=CYAN,stroke_opacity=.18,fill_color=PANEL,fill_opacity=.22).move_to(LEFT*3.15+DOWN*.18))
-            self.add(RoundedRectangle(width=5.75,height=5.2,corner_radius=.22,stroke_color=CYAN,stroke_opacity=.18,fill_color=PANEL,fill_opacity=.28).move_to(RIGHT*3.15+DOWN*.18))
-            eq_anchor=RIGHT*3.15+UP*.25; eq_max=5.0; vc=LEFT*3.15+DOWN*.15
-        else:
-            self.add(RoundedRectangle(width=11.8,height=5.2,corner_radius=.22,stroke_color=CYAN,stroke_opacity=.18,fill_color=PANEL,fill_opacity=.28).move_to(DOWN*.18))
-            eq_anchor=DOWN*.05; eq_max=10.8; vc=LEFT*3.15+DOWN*.15
-
-        objects={}
-        previous_equation=None
-
-        def pt(v, default=(0,0)):
-            try: return vc+np.array([float(v[0])*.62,float(v[1])*.62,0.0])
-            except Exception: return vc+np.array([float(default[0])*.62,float(default[1])*.62,0.0])
-
-        def num(v,d):
-            try: return float(v)
-            except Exception: return float(d)
-
-        def with_label(m,c):
-            lab=str(c.get("label") or "").strip()
-            if not lab: return m
-            x=Text(lab[:28],font_size=19,color=GOLD)
-            try: x.next_to(m,UP,buff=.08)
-            except Exception: x.move_to(m.get_center()+UP*.25)
-            return VGroup(m,x)
-
-        def safe_fn(expr):
-            names={"pi":math.pi,"e":math.e,"sin":math.sin,"cos":math.cos,"tan":math.tan,"sqrt":math.sqrt,"exp":math.exp,"log":math.log,"abs":abs}
-            nodes=(ast.Expression,ast.BinOp,ast.UnaryOp,ast.Call,ast.Name,ast.Load,ast.Constant,ast.Add,ast.Sub,ast.Mult,ast.Div,ast.Pow,ast.USub,ast.UAdd,ast.Mod)
-            try:
-                tree=ast.parse(str(expr).replace("^","**"),mode="eval")
-                for n in ast.walk(tree):
-                    if not isinstance(n,nodes): raise ValueError()
-                    if isinstance(n,ast.Name) and n.id!="x" and n.id not in names: raise ValueError()
-                    if isinstance(n,ast.Call) and (not isinstance(n.func,ast.Name) or n.func.id not in names): raise ValueError()
-                code=compile(tree,"<graph>","eval")
-                return lambda x: float(eval(code,{"__builtins__":{}},{**names,"x":x}))
-            except Exception: return None
-
-        def make(c):
-            typ=str(c.get("object_type") or "").lower(); p=c.get("params") or {}
-            if typ=="point": m=Dot(pt(p.get("point") or p.get("position") or [0,0]),radius=.07,color=GOLD)
-            elif typ in ("line","circuit_edge"): m=Line(pt(p.get("start") or p.get("from") or [0,0]),pt(p.get("end") or p.get("to") or [2,0]),color=CYAN,stroke_width=4)
-            elif typ in ("ray","arrow","vector","force_arrow"): m=Arrow(pt(p.get("start") or p.get("from") or [0,0]),pt(p.get("end") or p.get("to") or [2,0]),buff=0,color=GOLD if typ in ("vector","force_arrow") else CYAN,stroke_width=4)
-            elif typ=="polygon":
-                q=p.get("points") or [[-2,-1],[2,-1],[0,1.6]]
-                m=Polygon(*[pt(z) for z in q[:10]],color=CYAN,stroke_width=4,fill_color=PURPLE,fill_opacity=.10)
-            elif typ=="circle": m=Circle(radius=max(.2,min(2.3,num(p.get("radius"),1.3)*.62)),color=CYAN,stroke_width=4).move_to(pt(p.get("center") or [0,0]))
-            elif typ in ("arc","angle"):
-                m=Arc(radius=max(.18,min(1.3,num(p.get("radius"),.65)*.62)),start_angle=math.radians(num(p.get("start_angle"),0)),angle=math.radians(num(p.get("angle") or p.get("degrees"),60)),arc_center=pt(p.get("center") or p.get("vertex") or [0,0]),color=GOLD,stroke_width=5)
-            elif typ=="axes": m=Axes(x_range=(p.get("x_range") or [-5,5,1])[:3],y_range=(p.get("y_range") or [-3,3,1])[:3],x_length=5,y_length=3.6,tips=False).move_to(vc)
-            elif typ in ("graph","function"):
-                ax=next((o for o in objects.values() if isinstance(o,Axes)),None)
-                if ax is None:
-                    ax=Axes(x_range=[-5,5,1],y_range=[-3,3,1],x_length=5,y_length=3.6,tips=False).move_to(vc); objects["_axes"]=ax; self.add(ax)
-                fn=safe_fn(p.get("expression") or p.get("function") or "x")
-                m=ax.plot(fn or (lambda x:x),x_range=[-4.5,4.5],color=PINK,stroke_width=4)
-            elif typ in ("brace","dimension"):
-                base=Line(pt(p.get("start") or [-1,0]),pt(p.get("end") or [1,0]),color=MUTED); m=VGroup(base,Brace(base,direction=DOWN,color=GOLD))
-            elif typ=="label": m=Text(str(c.get("label") or p.get("text") or "")[:40],font_size=21,color=GOLD).move_to(pt(p.get("position") or [0,0]))
-            elif typ in ("marker","circuit_node"): m=Dot(pt(p.get("point") or p.get("position") or [0,0]),radius=.09,color=GOLD)
-            elif typ in ("region","highlight"):
-                q=p.get("points")
-                if isinstance(q,list) and len(q)>=3: m=Polygon(*[pt(z) for z in q[:10]],color=GOLD,fill_color=GOLD,fill_opacity=.18)
-                else: m=RoundedRectangle(width=max(.4,min(4.8,num(p.get("width"),2)*.62)),height=max(.3,min(3.8,num(p.get("height"),1)*.62)),corner_radius=.12,color=GOLD,fill_color=GOLD,fill_opacity=.12).move_to(pt(p.get("center") or [0,0]))
-            elif typ=="number_line": m=NumberLine(x_range=[num(p.get("min"),-5),num(p.get("max"),5),num(p.get("step"),1)],length=5,include_numbers=True,font_size=18).move_to(vc)
-            elif typ=="grid": m=NumberPlane(x_range=[0,int(num(p.get("cols"),4)),1],y_range=[0,int(num(p.get("rows"),4)),1],x_length=5,y_length=3.6).move_to(vc)
-            elif typ=="table":
-                d=p.get("data") or [["",""],["",""]]; d=[[str(v)[:14] for v in r[:5]] for r in d[:6] if isinstance(r,list)] or [["",""]]
-                m=Table(d,include_outer_lines=True); 
-                if m.width>5: m.scale_to_fit_width(5)
-                if m.height>3.8: m.scale_to_fit_height(3.8)
-                m.move_to(vc)
-            else: return None
-            return m if typ in ("label","table","axes","graph","function") else with_label(m,c)
-
-        def cue_anims(cues):
-            a=[]
-            for c in cues:
-                if not isinstance(c,dict): continue
-                act=str(c.get("action") or "create").lower(); oid=str(c.get("object_id") or "")[:48]
-                if not oid: continue
-                if act in ("create","show"):
-                    if oid in objects: a.append(Indicate(objects[oid],color=GOLD)); continue
-                    m=make(c)
-                    if m is not None: objects[oid]=m; a.append(Create(m) if act=="create" else FadeIn(m))
-                elif act=="highlight" and oid in objects: a.append(Indicate(objects[oid],color=GOLD,scale_factor=1.05))
-                elif act=="hide" and oid in objects: a.append(FadeOut(objects.pop(oid)))
-                elif act=="transform":
-                    old=objects.get(oid); new=make(c)
-                    if new is not None:
-                        objects[oid]=new; a.append(ReplacementTransform(old,new) if old is not None else Create(new))
-            return a
-
-        for bi,beat in enumerate(BEATS):
-            dur=float(beat.get("audio_duration") or 0); audio=str(beat.get("audio_path") or "")
-            latex=str(beat.get("math_latex") or "").strip(); state=str(beat.get("equation_state") or "hold").lower()
-            start=self.time
-            if audio: self.add_sound(audio)
-            anims=[]
-            if latex:
-                try:
-                    tex=MathTex(latex,font_size=42)
-                    tex.set_color(GOLD if state=="final" else CYAN if state=="introduce" else WHITE)
-                    if tex.width>eq_max: tex.scale_to_fit_width(eq_max)
-                    if tex.height>2.5: tex.scale_to_fit_height(2.5)
-                    tex.move_to(eq_anchor)
-                    if previous_equation is None:
-                        previous_equation=tex; anims.append(Write(tex))
-                    elif state=="hold":
-                        try: same=tex.get_tex_string()==previous_equation.get_tex_string()
-                        except Exception: same=False
-                        if not same: anims.append(ReplacementTransform(previous_equation,tex)); previous_equation=tex
-                    else:
-                        anims.append(ReplacementTransform(previous_equation,tex)); previous_equation=tex
-                except Exception: pass
-            anims.extend(cue_anims(beat.get("diagram_cues") or []))
-            if anims:
-                self.play(*anims,run_time=min(1.2,max(.28,dur*.42 if dur>0 else .55)))
-            elapsed=self.time-start
-            if dur>elapsed: self.wait(dur-elapsed)
-            if bi<len(BEATS)-1: self.wait(.06)
-
-        if previous_equation is not None: self.play(Indicate(previous_equation,color=GOLD,scale_factor=1.04),run_time=.35)
-        self.wait(.15)
-""" % (data, title, bool(has_visuals))
-
-
 def build_direct_manim_script(
     prompt: str,
     steps: List[SolutionStep],
@@ -2375,43 +2172,361 @@ def validate_manim_code(
 # RENDER MANIM
 # ============================================================
 
+
+def _merge_v7_visual_plan(
+    steps: List[SolutionStep],
+    visual_plan: Optional[dict],
+) -> List[dict]:
+    """Merge planner beats into canonical narration steps by segment_index."""
+    beats = {}
+    if isinstance(visual_plan, dict):
+        for beat in visual_plan.get("beats", []) or []:
+            if isinstance(beat, dict):
+                try:
+                    beats[int(beat.get("segment_index"))] = beat
+                except Exception:
+                    pass
+
+    merged = []
+    for i, step in enumerate(steps):
+        seg = step.segment_index if step.segment_index is not None else i
+        beat = beats.get(int(seg), {})
+        cues = beat.get("diagram_cues")
+        if not isinstance(cues, list):
+            cues = step.diagram_cues or []
+
+        merged.append({
+            "step_number": step.step_number,
+            "segment_index": int(seg),
+            "math_latex": clean_latex(step.math_latex or ""),
+            "explanation": clean_spoken_text(step.explanation or ""),
+            "scene": beat.get("scene") or step.scene or "equation",
+            "equation_state": beat.get("equation_state") or step.equation_state or "hold",
+            "diagram_cues": cues,
+            "retain": beat.get("retain") or [],
+            "remove": beat.get("remove") or [],
+            "focus": beat.get("focus") or [],
+            "emphasis": step.emphasis or [],
+        })
+    return merged
+
+
+def build_direct_manim_script_v7(
+    prompt: str,
+    steps: List[SolutionStep],
+    job_id: str,
+    visual_plan: Optional[dict] = None,
+    theme: Optional[dict] = None,
+) -> str:
+    """
+    Tezla v7: canonical narration is the master clock.
+    AI supplies declarative cues only; generated Python never executes AI code.
+    """
+    merged = _merge_v7_visual_plan(steps, visual_plan)
+    audio = prepare_step_audio(steps, job_id)
+
+    for i, item in enumerate(merged):
+        a = audio[i] if i < len(audio) else {}
+        item["audio_path"] = str(a.get("path")) if a.get("path") else None
+        item["audio_duration"] = float(a.get("duration") or 0.0)
+
+    title = clean_title(prompt)
+    title = re.sub(r"\$\$.*?\$\$|\$.*?\$", "", title)
+    title = re.sub(r"\\[A-Za-z]+(?:\{[^{}]*\})?", "", title)
+    title = re.sub(r"[{}_^=\\\\]+", " ", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    if not title:
+        title = "Interactive Lesson"
+    title = title[:56]
+
+    payload_literal = repr(merged)
+    theme_literal = repr(theme or {})
+
+    return f"""from manim import *
+import numpy as np
+import ast
+import math
+
+BEATS = {payload_literal}
+THEME = {theme_literal}
+TITLE_TEXT = {title!r}
+
+class GeneratedScene(Scene):
+    def construct(self):
+        self.camera.background_color = THEME.get("background", "#07111f")
+        CYAN = THEME.get("primary", "#22D3EE")
+        GOLD = THEME.get("accent", "#FBBF24")
+        GREEN = "#34D399"
+        PINK = "#F472B6"
+        PURPLE = "#A78BFA"
+        MUTED = "#94A3B8"
+
+        brand = Text("TEZLA ANIMATOR", font_size=17, weight=BOLD, color=CYAN).to_corner(UL, buff=0.25)
+        title = Text(TITLE_TEXT, font_size=25, weight=BOLD)
+        if title.width > 9.6:
+            title.scale_to_fit_width(9.6)
+        title.to_edge(UP, buff=0.25)
+        divider = Line(LEFT*6.4, RIGHT*6.4, color=CYAN, stroke_opacity=0.28).next_to(title, DOWN, buff=0.16)
+        self.add(brand, title, divider)
+
+        objects = {{}}
+        current_eq = None
+        eq_anchor = RIGHT*3.15 + UP*0.15
+        diagram_center = LEFT*3.05 + DOWN*0.35
+
+        def vec(v, default=(0,0,0)):
+            try:
+                a = list(v)
+                if len(a) == 2: a.append(0)
+                return np.array([float(a[0]), float(a[1]), float(a[2])])
+            except Exception:
+                return np.array(default, dtype=float)
+
+        def bounded_point(v):
+            p = vec(v)
+            p[0] = max(-5.8, min(1.0, p[0]))
+            p[1] = max(-3.0, min(2.5, p[1]))
+            return p
+
+        def safe_color(c, fallback=CYAN):
+            if isinstance(c, str) and (c.startswith("#") or c.isalpha()):
+                return c
+            return fallback
+
+        def safe_math(s, size=34, color=WHITE):
+            try:
+                m = MathTex(str(s), font_size=size, color=color)
+            except Exception:
+                m = Text(str(s).replace("\\\\", ""), font_size=max(18, int(size*0.65)), color=color)
+            return m
+
+        def safe_expr(expr):
+            allowed_names = {{
+                "x": 0.0, "pi": math.pi, "e": math.e,
+                "sin": math.sin, "cos": math.cos, "tan": math.tan,
+                "sqrt": math.sqrt, "exp": math.exp, "log": math.log,
+                "abs": abs,
+            }}
+            allowed_nodes = (
+                ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Load,
+                ast.Name, ast.Constant, ast.Add, ast.Sub, ast.Mult, ast.Div,
+                ast.Pow, ast.USub, ast.UAdd, ast.Mod,
+            )
+            tree = ast.parse(str(expr), mode="eval")
+            for node in ast.walk(tree):
+                if not isinstance(node, allowed_nodes):
+                    raise ValueError("unsafe expression")
+                if isinstance(node, ast.Name) and node.id not in allowed_names:
+                    raise ValueError("unknown name")
+                if isinstance(node, ast.Call):
+                    if not isinstance(node.func, ast.Name) or node.func.id not in allowed_names:
+                        raise ValueError("unsafe call")
+            code = compile(tree, "<graph>", "eval")
+            return lambda x: float(eval(code, {{"__builtins__": {{}}}}, {{**allowed_names, "x": x}}))
+
+        def make_label(text, params, color=WHITE):
+            kind = str(params.get("content_type", "text")).lower()
+            if kind == "math":
+                return safe_math(text, int(params.get("font_size", 28)), color)
+            return Text(str(text), font_size=int(params.get("font_size", 24)), color=color)
+
+        def make_object(cue):
+            typ = str(cue.get("object_type", "")).lower()
+            p = cue.get("params") if isinstance(cue.get("params"), dict) else {{}}
+            color = safe_color(p.get("color"), CYAN)
+            label = cue.get("label") or p.get("text") or ""
+            stroke = max(1.0, min(8.0, float(p.get("stroke_width", 3))))
+
+            if typ in ("point", "marker", "circuit_node"):
+                center = bounded_point(p.get("point") or p.get("position") or [-3,0,0])
+                obj = Dot(center, radius=max(.04, min(.18, float(p.get("radius", .08)))), color=color)
+                if label:
+                    lab = make_label(label, p, WHITE).scale(0.75).next_to(obj, UP, buff=.10)
+                    return VGroup(obj, lab)
+
+            if typ in ("line", "ray", "circuit_edge"):
+                a = bounded_point(p.get("start") or [-4,0,0]); b = bounded_point(p.get("end") or [-2,0,0])
+                return Line(a, b, color=color, stroke_width=stroke)
+
+            if typ in ("arrow", "vector", "force_arrow", "dimension"):
+                a = bounded_point(p.get("start") or [-4,0,0]); b = bounded_point(p.get("end") or [-2,0,0])
+                arr = Arrow(a, b, buff=0, color=color, stroke_width=stroke)
+                if label:
+                    lab = make_label(label, p, color).scale(.75).next_to(arr.get_center(), UP, buff=.08)
+                    return VGroup(arr, lab)
+                return arr
+
+            if typ in ("polygon", "region"):
+                pts = p.get("points") or []
+                pts = [bounded_point(x) for x in pts if isinstance(x, (list, tuple))]
+                if len(pts) >= 3:
+                    poly = Polygon(*pts, color=color, stroke_width=stroke)
+                    if typ == "region" or p.get("fill_opacity"):
+                        poly.set_fill(color, opacity=max(0, min(.45, float(p.get("fill_opacity", .12)))))
+                    return poly
+
+            if typ == "circle":
+                center = bounded_point(p.get("center") or [-3,0,0])
+                radius = max(.15, min(2.2, float(p.get("radius", 1.0))))
+                return Circle(radius=radius, color=color, stroke_width=stroke).move_to(center)
+
+            if typ == "arc":
+                center = bounded_point(p.get("center") or [-3,0,0])
+                radius = max(.15, min(2.0, float(p.get("radius", .7))))
+                sa = float(p.get("start_angle", 0)); ang = float(p.get("angle", math.pi/2))
+                return Arc(radius=radius, start_angle=sa, angle=ang, color=color).move_arc_center_to(center)
+
+            if typ == "angle":
+                a = bounded_point(p.get("a") or [-4,0,0]); v = bounded_point(p.get("vertex") or [-3,0,0]); b = bounded_point(p.get("b") or [-3,1,0])
+                l1 = Line(v, a); l2 = Line(v, b)
+                return Angle(l1, l2, radius=max(.18, min(.8, float(p.get("radius", .4)))), color=color)
+
+            if typ in ("axes", "grid"):
+                xr = p.get("x_range") or [-4,4,1]; yr = p.get("y_range") or [-3,3,1]
+                axes = Axes(x_range=xr, y_range=yr, x_length=5.2, y_length=3.8, tips=False, axis_config={{"color": MUTED}})
+                axes.move_to(diagram_center)
+                return axes
+
+            if typ in ("graph", "function"):
+                axes_id = str(p.get("axes_id") or "axes")
+                axes = objects.get(axes_id)
+                if axes is None or not isinstance(axes, Axes):
+                    axes = Axes(x_range=[-4,4,1], y_range=[-3,3,1], x_length=5.2, y_length=3.8, tips=False).move_to(diagram_center)
+                    objects[axes_id] = axes
+                    self.add(axes)
+                expr = p.get("expression") or p.get("function") or "x"
+                try: fn = safe_expr(expr)
+                except Exception: fn = lambda x: x
+                xr = p.get("x_range") or [-4,4]
+                return axes.plot(fn, x_range=[float(xr[0]), float(xr[1])], color=color)
+
+            if typ == "number_line":
+                xr = p.get("x_range") or [-5,5,1]
+                return NumberLine(x_range=xr, length=5.4, include_numbers=True, color=MUTED).move_to(diagram_center)
+
+            if typ in ("label", "highlight", "brace"):
+                obj = make_label(label or p.get("text") or "", p, color)
+                obj.move_to(bounded_point(p.get("position") or [-3,0,0]))
+                return obj
+
+            if typ == "table":
+                rows = p.get("rows") or [[""]]
+                rows = [[str(x) for x in row] for row in rows[:6] if isinstance(row, list)]
+                if rows:
+                    tab = Table(rows, include_outer_lines=True).scale(.45).move_to(diagram_center)
+                    return tab
+
+            return None
+
+        def animate_cues(cues, beat_duration):
+            animations = []
+            removals = []
+            for cue in cues[:16]:
+                if not isinstance(cue, dict): continue
+                action = str(cue.get("action", "show")).lower()
+                oid = str(cue.get("object_id", "")).strip()[:80]
+                if not oid: continue
+
+                if action == "hide":
+                    old = objects.get(oid)
+                    if old is not None:
+                        animations.append(FadeOut(old)); removals.append(oid)
+                    continue
+
+                if action == "highlight":
+                    old = objects.get(oid)
+                    if old is not None:
+                        animations.append(Indicate(old, color=GOLD, scale_factor=1.06))
+                    continue
+
+                new = make_object(cue)
+                if new is None: continue
+                old = objects.get(oid)
+
+                if action == "transform" and old is not None:
+                    animations.append(ReplacementTransform(old, new))
+                    objects[oid] = new
+                elif old is None:
+                    objects[oid] = new
+                    animations.append(Create(new) if isinstance(new, (Line, Polygon, Circle, Arc, Axes, NumberLine)) else FadeIn(new))
+                elif action in ("create", "show"):
+                    # Stable ID already exists: retain it rather than duplicating.
+                    pass
+
+            if animations:
+                rt = max(.25, min(1.8, beat_duration * .42 if beat_duration > 0 else .7))
+                self.play(*animations, run_time=rt)
+            for oid in removals:
+                objects.pop(oid, None)
+
+        for beat in BEATS:
+            step_start = self.time
+            audio_path = beat.get("audio_path")
+            audio_duration = max(0.0, float(beat.get("audio_duration") or 0.0))
+            if audio_path:
+                self.add_sound(audio_path)
+
+            # Explicit planner removals happen at the beginning of the beat.
+            rm_anims = []
+            for oid in beat.get("remove", []) or []:
+                obj = objects.get(str(oid))
+                if obj is not None:
+                    rm_anims.append(FadeOut(obj))
+                    objects.pop(str(oid), None)
+            if rm_anims:
+                self.play(*rm_anims, run_time=min(.45, max(.2, audio_duration*.12)))
+
+            tex = str(beat.get("math_latex") or "").strip()
+            state = str(beat.get("equation_state") or "hold").lower()
+            if tex and state != "hold":
+                new_eq = safe_math(tex, 38, WHITE)
+                # Scale down only; never enlarge a tiny formula.
+                if new_eq.width > 5.25: new_eq.scale_to_fit_width(5.25)
+                if new_eq.height > 2.15: new_eq.scale_to_fit_height(2.15)
+                new_eq.move_to(eq_anchor)
+                if state == "final":
+                    new_eq.set_color(GREEN)
+                if current_eq is None:
+                    self.play(Write(new_eq), run_time=min(.9, max(.3, audio_duration*.20)))
+                else:
+                    self.play(TransformMatchingTex(current_eq, new_eq), run_time=min(1.0, max(.3, audio_duration*.22)))
+                current_eq = new_eq
+
+            animate_cues(beat.get("diagram_cues") or [], audio_duration)
+
+            for oid in beat.get("focus", []) or []:
+                obj = objects.get(str(oid))
+                if obj is not None:
+                    self.play(Indicate(obj, color=GOLD, scale_factor=1.04), run_time=min(.55, max(.25, audio_duration*.10)))
+
+            elapsed = self.time - step_start
+            if audio_duration > elapsed:
+                self.wait(audio_duration - elapsed)
+            elif audio_duration <= 0:
+                self.wait(.35)
+
+        self.wait(.25)
+"""
+
+
 def render_manim_script(
     script_path: Path,
     job_id: str,
 ) -> Path:
+    """Run Manim with a non-blocking selectors watchdog."""
+    import selectors
+    import time
 
-    print(
-        f"Starting Manim render: {job_id}"
-    )
-
-    job_media_dir = (
-        MEDIA_DIR /
-        job_id
-    )
-
-    job_media_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    print(f"Starting Manim render: {job_id}", flush=True)
+    job_media_dir = MEDIA_DIR / job_id
+    job_media_dir.mkdir(parents=True, exist_ok=True)
 
     manim_cmd = [
-        "manim",
-        "-ql",
-        "--disable_caching",
-        "--media_dir",
-        str(job_media_dir),
-        str(script_path),
-        "GeneratedScene",
+        "manim", "-ql", "--disable_caching",
+        "--media_dir", str(job_media_dir),
+        str(script_path), "GeneratedScene",
     ]
-
-    print(
-        "Running:",
-        " ".join(manim_cmd),
-        flush=True,
-    )
-
-    # Stream Manim output live so Render shows the exact failure/hang point.
-    print("Launching Manim with live output...", flush=True)
+    print("Running:", " ".join(manim_cmd), flush=True)
 
     process = subprocess.Popen(
         manim_cmd,
@@ -2421,115 +2536,61 @@ def render_manim_script(
         bufsize=1,
     )
 
+    selector = selectors.DefaultSelector()
+    if process.stdout:
+        selector.register(process.stdout, selectors.EVENT_READ)
+
     output_lines = []
+    started_at = time.monotonic()
+    last_output_at = started_at
 
     try:
-        import time
-        started_at = time.monotonic()
-        last_output_at = started_at
-
-        import selectors
-        selector = selectors.DefaultSelector()
-        if process.stdout:
-            selector.register(process.stdout, selectors.EVENT_READ)
-
-        while True:
-            line = ""
-            events = selector.select(timeout=0.20)
-            if events and process.stdout:
-                line = process.stdout.readline()
-
-            if line:
-                clean_line = line.rstrip()
-                output_lines.append(clean_line)
-                print("[MANIM]", clean_line, flush=True)
-                last_output_at = time.monotonic()
-
-            return_code = process.poll()
+        while process.poll() is None:
             now = time.monotonic()
-
-            if return_code is not None:
-                break
-
             if now - started_at > 420:
-                print("MANIM WATCHDOG: hard timeout after 420 seconds.", flush=True)
                 process.kill()
-                process.wait(timeout=10)
-                raise RuntimeError(
-                    "Manim exceeded the 420-second render timeout."
-                )
-
+                raise RuntimeError("Manim exceeded the 420-second render timeout.")
             if now - last_output_at > 120:
-                print(
-                    "MANIM WATCHDOG: no output for 120 seconds; killing stuck render.",
-                    flush=True,
-                )
                 process.kill()
-                process.wait(timeout=10)
                 tail = "\n".join(output_lines[-80:])
-                raise RuntimeError(
-                    "Manim produced no output for 120 seconds. Last output:\n"
-                    + tail
-                )
+                raise RuntimeError("Manim produced no output for 120 seconds. Last output:\n" + tail)
 
-            if not line:
-                time.sleep(0.15)
+            events = selector.select(timeout=0.5)
+            for key, _ in events:
+                line = key.fileobj.readline()
+                if line:
+                    clean = line.rstrip()
+                    output_lines.append(clean)
+                    print("[MANIM]", clean, flush=True)
+                    last_output_at = time.monotonic()
 
+        # Drain remaining buffered output.
+        if process.stdout:
+            for line in process.stdout:
+                clean = line.rstrip()
+                if clean:
+                    output_lines.append(clean)
+                    print("[MANIM]", clean, flush=True)
     finally:
+        try:
+            selector.close()
+        except Exception:
+            pass
         if process.stdout:
             process.stdout.close()
 
-    manim_output = "\n".join(output_lines)
-    print("Manim return code:", process.returncode, flush=True)
-
     if process.returncode != 0:
-        raise RuntimeError(
-            "Manim rendering failed.\n\n"
-            + (manim_output or "No Manim output was captured.")
-        )
+        raise RuntimeError("Manim rendering failed.\n\n" + ("\n".join(output_lines) or "No Manim output was captured."))
 
-    video_files = list(
-        job_media_dir.rglob(
-            "GeneratedScene.mp4"
-        )
-    )
-
+    video_files = list(job_media_dir.rglob("GeneratedScene.mp4")) or list(job_media_dir.rglob("*.mp4"))
     if not video_files:
+        raise RuntimeError("Manim finished successfully but no MP4 file was found.")
 
-        video_files = list(
-            job_media_dir.rglob(
-                "*.mp4"
-            )
-        )
-
-    if not video_files:
-
-        raise RuntimeError(
-            "Manim finished successfully but "
-            "no MP4 file was found."
-        )
-
-    source_video = max(
-        video_files,
-        key=lambda p: p.stat().st_mtime,
-    )
-
-    final_video = (
-        OUTPUT_DIR /
-        f"{job_id}.mp4"
-    )
-
-    shutil.copy2(
-        source_video,
-        final_video,
-    )
-
-    print(
-        f"Video created: {final_video}"
-    )
-
+    source_video = max(video_files, key=lambda p: p.stat().st_mtime)
+    final_video = OUTPUT_DIR / f"{job_id}.mp4"
+    shutil.copy2(source_video, final_video)
+    print(f"Video created: {final_video}", flush=True)
     return final_video
-
 
 # ============================================================
 # ROOT
@@ -2818,7 +2879,7 @@ def generate_video(
     )
 
     provider_used = (
-        "direct-solution-steps-v7-compatible"
+        "direct-solution-steps-v6"
     )
 
     try:
@@ -2834,13 +2895,12 @@ def generate_video(
                 "teaching steps."
             )
 
-            if int(req.version or 0) >= 7 or req.visual_plan:
+            if (req.version or 0) >= 7 or req.visual_plan:
                 provider_used = "direct-visual-timeline-v7"
                 code = build_direct_manim_script_v7(
                     prompt=req.prompt,
                     steps=req.solution_steps,
                     job_id=job_id,
-                    diagram_spec=req.diagram_spec,
                     visual_plan=req.visual_plan,
                     theme=req.theme,
                 )
