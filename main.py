@@ -17,7 +17,7 @@ from pydantic import BaseModel
 # CONFIGURATION
 # ============================================================
 
-APP_VERSION = "6.4.0"
+APP_VERSION = "6.4.1"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -1076,45 +1076,45 @@ def add_visual_action(
         if action in {"", "show_triangle", "introduce_shape"}:
             lines.extend([
                 "        if not angle_triangle_created:",
-                "            self.play(Create(angle_triangle), run_time=sync_rt)",
+                f"            self.play(Create(angle_triangle), run_time={sync_rt:.2f})",
                 "            angle_triangle_created = True",
             ])
 
         elif action in {"show_interior_angles", "highlight_angle_sum"}:
             lines.extend([
                 "        if not angle_triangle_created:",
-                "            self.play(Create(angle_triangle), run_time=max(sync_rt * 0.45, 0.25))",
+                f"            self.play(Create(angle_triangle), run_time={max(sync_rt * 0.45, 0.25):.2f})",
                 "            angle_triangle_created = True",
                 "        if not interior_angles_visible:",
                 "            self.play(",
                 "                Create(angle_a), Create(angle_b), Create(angle_c),",
                 "                FadeIn(angle_a_label), FadeIn(angle_b_label), FadeIn(angle_c_label),",
-                "                run_time=max(sync_rt * 0.55, 0.30),",
+                f"                run_time={max(sync_rt * 0.55, 0.30):.2f},",
                 "            )",
                 "            interior_angles_visible = True",
                 "        else:",
-                "            self.play(Indicate(VGroup(angle_a, angle_b, angle_c)), run_time=sync_rt)",
+                f"            self.play(Indicate(VGroup(angle_a, angle_b, angle_c)), run_time={sync_rt:.2f})",
             ])
 
         elif action in {"show_exterior_angle", "highlight_exterior_angle"}:
             lines.extend([
                 "        if not angle_triangle_created:",
-                "            self.play(Create(angle_triangle), run_time=max(sync_rt * 0.40, 0.25))",
+                f"            self.play(Create(angle_triangle), run_time={max(sync_rt * 0.40, 0.25):.2f})",
                 "            angle_triangle_created = True",
                 "        if not exterior_angle_visible:",
                 "            self.play(",
                 "                Create(exterior_ray), Create(exterior_arc), FadeIn(exterior_label),",
-                "                run_time=max(sync_rt * 0.60, 0.30),",
+                f"                run_time={max(sync_rt * 0.60, 0.30):.2f},",
                 "            )",
                 "            exterior_angle_visible = True",
                 "        else:",
-                "            self.play(Indicate(exterior_arc, color=TEZLA_GOLD), run_time=sync_rt)",
+                f"            self.play(Indicate(exterior_arc, color=TEZLA_GOLD), run_time={sync_rt:.2f})",
             ])
 
         else:
             lines.extend([
                 "        if not angle_triangle_created:",
-                "            self.play(Create(angle_triangle), run_time=sync_rt)",
+                f"            self.play(Create(angle_triangle), run_time={sync_rt:.2f})",
                 "            angle_triangle_created = True",
             ])
 
